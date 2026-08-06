@@ -1,16 +1,14 @@
 import socket
 
-# 1. Khởi tạo socket (AF_INET là chuẩn IPv4, SOCK_DGRAM là chuẩn UDP)
 server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-
-# 2. Gắn Server vào cổng (port) 9999 trên máy của em (localhost)
 server.bind(("127.0.0.1", 9999))
-print("Server UDP đang đứng đợi dữ liệu...")
+print("Server đang đợi hứng file...")
 
-# 3. Tạo một vòng lặp để liên tục hứng dữ liệu
-while True:
-    # Hứng tối đa 1024 bytes một lần. Nhận được data và địa chỉ người gửi
-    data, address = server.recvfrom(1024) 
-    
-    # In ra màn hình (phải dùng .decode() để dịch dữ liệu byte thành chữ)
-    print(f"Nhận được: '{data.decode('utf-8')}' từ địa chỉ {address}")
+# Hứng dữ liệu (tạm thời để buffer lớn xíu: 4096 bytes)
+data, address = server.recvfrom(4096) 
+
+# Mở một file mới để ghi dữ liệu nhị phân vào ('wb' - write binary)
+with open("file_nhan_duoc.txt", "wb") as f:
+    f.write(data)
+
+print(f"Đã nhận file từ {address} và lưu thành công!")
