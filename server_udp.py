@@ -2,13 +2,25 @@ import socket
 
 server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 server.bind(("127.0.0.1", 9999))
-print("Server đang đợi hứng file...")
+print("Server UDP đang đợi hứng các mảnh file...")
 
-# Hứng dữ liệu (tạm thời để buffer lớn xíu: 4096 bytes)
-data, address = server.recvfrom(4096) 
-
-# Mở một file mới để ghi dữ liệu nhị phân vào ('wb' - write binary)
 with open("file_nhan_duoc.txt", "wb") as f:
-    f.write(data)
-
-print(f"Đã nhận file từ {address} và lưu thành công!")
+    while True:
+        data, address = server.recvfrom(2048) 
+        
+        # Bóc nhãn lấy số thứ tự
+        seq_num = int.from_bytes(data[:4], byteorder='big')
+        payload = data[4:] 
+        
+        # Bắt cờ kết thúc
+        if payload == b'EOF':
+            print("\nĐã nhận được cờ báo kết thúc. Lưu file thành công!")
+            server.sendto(b'ACK_EOF', address)
+            break
+            
+        print(f"Đang hứng mảnh số {seq_num}... Gửi lại ACK_{seq_num}")
+        f.write(payload)
+        
+        # ĐÂY LÀ "CÁI MIỆNG" CỦA SERVER: TẠO VÀ GỬI ACK NGƯỢC LẠI
+        ack_packet = f"ACK_{seq_num}".encode('utf-8')
+        server.sendto(ack_packet, address)
