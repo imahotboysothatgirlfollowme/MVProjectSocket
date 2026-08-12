@@ -1,0 +1,11 @@
+# Bỏ qua bộ đệm Python
+__pycache__/
+*.pyc
+
+# Bỏ qua cài đặt riêng của VS Code / PyCharm
+.vscode/
+.idea/
+
+# Bỏ qua các file tạm trên Windows/Mac
+Thumbs.db
+.DS_Store
