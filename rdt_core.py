@@ -42,17 +42,18 @@ def parse_packet(packet):
 
 def rdt_send(filename, target_addr):
     udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    
-    # [QUAN TRỌNG] Chuyển socket sang Non-blocking để vòng lặp không bị đóng băng khi đợi ACK
     udp_sock.setblocking(False) 
     
-    WINDOW_SIZE = 5     # Kích thước bộ đệm (Cửa sổ trượt tối đa 5 gói)
-    CHUNK_SIZE = 1024
-    TIMEOUT = 2.0
+    # --- THÊM CONGESTION CONTROL (TIÊU CHÍ EXCELLENT) ---
+    cwnd = 1.0          # Congestion Window (Bắt đầu bằng cửa sổ = 1: Slow Start)
+    ssthresh = 16.0     # Ngưỡng Slow Start Threshold
     
-    base = 0            # Con trỏ chốt sổ: Gói cũ nhất chưa được xác nhận
-    next_seq_num = 0    # Con trỏ phát: Gói tiếp theo chuẩn bị gửi
-    window_buffer = {}  # Cấu trúc dữ liệu Hash map (Dictionary) lưu các gói đang "bay"
+    CHUNK_SIZE = 1024
+    TIMEOUT = 1.0       # Set 1.0s là tối ưu cho mạng LAN/Local
+    
+    base = 0            # Con trỏ chốt sổ
+    next_seq_num = 0    # Con trỏ phát
+    window_buffer = {}  # Bộ nhớ đệm (Dictionary)
     
     if not os.path.exists(filename):
         return False
@@ -61,51 +62,74 @@ def rdt_send(filename, target_addr):
     eof_reached = False
     start_time = time.time()
 
-    # Vòng lặp chạy cho đến khi đọc hết file VÀ mọi gói trong cửa sổ đều đã được ACK an toàn
     while not eof_reached or base < next_seq_num:
         
-        # --- BƯỚC 1: BƠM GÓI TIN VÀO CỬA SỔ (FLOW CONTROL) ---
-        # Chỉ đọc và gửi thêm nếu khoảng cách giữa con trỏ phát và con trỏ chốt chưa vượt quá Window Size
-        while next_seq_num < base + WINDOW_SIZE and not eof_reached:
+        current_window_size = int(cwnd) # Lấy phần nguyên của cửa sổ hiện tại
+        
+        # --- BƯỚC 1: BƠM GÓI TIN THEO CỬA SỔ ĐỘNG ---
+        while next_seq_num < base + current_window_size and not eof_reached:
             chunk = f.read(CHUNK_SIZE)
             if not chunk:
                 eof_reached = True
                 break 
             
             packet = make_packet(next_seq_num, 0, FLAG_DATA, chunk)
-            window_buffer[next_seq_num] = packet # Lưu bản sao vào buffer để phòng hờ rớt mạng
-            
+            window_buffer[next_seq_num] = packet 
             udp_sock.sendto(packet, target_addr)
+            
+            # Chỉ khởi động lại đồng hồ khi gửi gói đầu tiên trong cửa sổ
+            if base == next_seq_num: 
+                start_time = time.time()
+                
             next_seq_num += 1
 
-        # --- BƯỚC 2: HỨNG ACK TỪ RECEIVER ---
+        # --- BƯỚC 2: HỨNG ACK (CUMULATIVE ACK) ---
         try:
-            ack_data, _ = udp_sock.recvfrom(2048)
-            ack_seq, _, ack_flag, _, _, _ = parse_packet(ack_data)
-            
-            # Chỉ dịch cửa sổ lên khi nhận đúng ACK của gói 'base' (Xử lý chặt chẽ theo tuần tự)
-            if ack_flag == FLAG_ACK and ack_seq == base:
-                del window_buffer[base]  # Giải phóng bộ nhớ gói đã hạ cánh an toàn
-                base += 1                # Trượt cửa sổ lên 1 nấc
-                start_time = time.time() # Reset lại đồng hồ báo thức
+            # Dùng vòng lặp while để vét sạch toàn bộ ACK đang kẹt trong buffer hệ điều hành
+            while True:
+                ack_data, _ = udp_sock.recvfrom(2048)
+                ack_seq, _, ack_flag, _, _, _ = parse_packet(ack_data)
                 
+                # Nếu là ACK hợp lệ và nằm trong hoặc cao hơn mốc base hiện tại
+                if ack_flag == FLAG_ACK and ack_seq >= base:
+                    
+                    # Giải phóng toàn bộ các gói từ base đến ack_seq ra khỏi RAM
+                    for i in range(base, ack_seq + 1):
+                        if i in window_buffer:
+                            del window_buffer[i]
+                            
+                    base = ack_seq + 1 # Trượt con trỏ cái "vèo" qua tất cả
+                    start_time = time.time() # Reset đồng hồ
+                    
+                    # [TĂNG TỐC ĐỘ TRUYỀN TẢI THEO MẠNG]
+                    if cwnd < ssthresh:
+                        cwnd += 1 # Slow Start: Tăng tốc cực nhanh theo hàm mũ
+                    else:
+                        cwnd += 1.0 / int(cwnd) # Congestion Avoidance: Tăng chậm lại tránh nghẽn
+                        
         except BlockingIOError:
-            pass # Bỏ qua nếu socket chưa có tín hiệu phản hồi (Đặc trưng của Non-blocking)
+            pass # Socket non-blocking sẽ ném lỗi này nếu không có dữ liệu, ta bỏ qua
 
-        # --- BƯỚC 3: XỬ LÝ TIMEOUT (CONGESTION CONTROL / RETRANSMIT) ---
-        if time.time() - start_time > TIMEOUT:
-            # Thuật toán Go-Back-N: Bắn lại toàn bộ các gói đang nằm trong bộ đệm cửa sổ
+        # --- BƯỚC 3: XỬ LÝ TIMEOUT & RETRANSMIT (GBN) ---
+        # Chỉ check timeout nếu vẫn còn gói đang bay (base < next_seq_num)
+        if base < next_seq_num and time.time() - start_time > TIMEOUT:
+            
+            # [PHẠT MẠNG TẮC NGHẼN] Rớt gói -> Giảm cửa sổ truyền
+            ssthresh = max(2.0, cwnd / 2.0) # Lưu lại mốc an toàn
+            cwnd = 1.0 # Ép mạng khởi động lại từ đầu để tránh dội bom UDP
+            
+            # Bắn lại toàn bộ các gói đang nằm trong bộ đệm cửa sổ
             for i in range(base, next_seq_num):
                 if i in window_buffer:
                     udp_sock.sendto(window_buffer[i], target_addr)
-            start_time = time.time() # Reset lại đồng hồ sau khi bắn lại
+            start_time = time.time()
 
     f.close()
 
     # ==========================================
-    # ĐÓNG GÓI EOF KẾT THÚC (Giữ nguyên Stop-and-Wait cho an toàn)
+    # GỬI GÓI EOF (Giữ nguyên logic của bạn - Stop & Wait an toàn)
     # ==========================================
-    udp_sock.setblocking(True) # Trả về blocking bình thường để gửi chốt hạ
+    udp_sock.setblocking(True) 
     udp_sock.settimeout(2.0)
     eof_packet = make_packet(next_seq_num, 0, FLAG_EOF, b'EOF')
     
@@ -129,14 +153,12 @@ def rdt_receive(udp_sock, save_filename):
         while True:
             try:
                 data, addr = udp_sock.recvfrom(2048) 
-                
-                # Bóc tách gói tin
                 seq_num, ack_num, flags, payload_len, checksum, payload = parse_packet(data)
                 
-                # 1. Congestion/Error Control: Xác thực tính toàn vẹn (Checksum)
+                # 1. Congestion/Error Control: Xác thực toàn vẹn
                 computed_checksum = zlib.crc32(payload) & 0xffffffff
                 if computed_checksum != checksum:
-                    continue # Nếu file bị móp méo giữa đường truyền, DROP gói tin (không gửi ACK để bắt bên kia gửi lại)
+                    continue # Bỏ qua gói lỗi (không làm gì cả để ép Sender timeout)
                 
                 # 2. Xử lý cờ kết thúc
                 if flags == FLAG_EOF:
@@ -144,14 +166,18 @@ def rdt_receive(udp_sock, save_filename):
                     udp_sock.sendto(ack_packet, addr)
                     break
                     
-                # 3. Lọc trùng lặp và ghi file
+                # 3. LOGIC GBN RECEIVER CHUẨN
                 if seq_num == expected_seq:
+                    # Gói đến ĐÚNG thứ tự -> Ghi file và gửi ACK cho chính nó
                     f.write(payload)
+                    ack_packet = make_packet(expected_seq, expected_seq, FLAG_ACK, b'')
+                    udp_sock.sendto(ack_packet, addr)
                     expected_seq += 1  
-                
-                # 4. Bắn ACK xác nhận lại cho Client/Server
-                ack_packet = make_packet(seq_num, seq_num, FLAG_ACK, b'')
-                udp_sock.sendto(ack_packet, addr)
+                else:
+                    # Gói đến SAI thứ tự -> Vứt đi và gửi lại ACK của gói đúng gần nhất
+                    if expected_seq > 0:
+                        ack_packet = make_packet(expected_seq - 1, expected_seq - 1, FLAG_ACK, b'')
+                        udp_sock.sendto(ack_packet, addr)
             
             except Exception:
                 pass
