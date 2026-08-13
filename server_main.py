@@ -19,7 +19,9 @@ def handle_client(conn, addr):
     active_clients[addr] = {
         "user": "Chưa rõ", 
         "status": "Đang chờ đăng nhập", 
-        "mode": "-"
+        "mode": "-",
+        "data_type": "I",  # Default I = Image/Binary
+        "tran_mode": "S"   # Default S = Stream
     }
     
     is_logged_in = False
@@ -227,6 +229,26 @@ def handle_client(conn, addr):
                     print(f"[*] Đã gửi SHA-256 của file '{arg}': {digest}")
                 else:
                     conn.sendall(b"550 Khong tim thay file\r\n")
+
+            elif cmd == "TYPE":
+                # ==========================================
+                # ĐỊNH DẠNG DỮ LIỆU (A = ASCII, I = Binary)
+                # ==========================================
+                if arg.upper() in ['A', 'I']:
+                    active_clients[addr]["data_type"] = arg.upper()
+                    conn.sendall(f"200 Chuyen doi thanh cong sang kieu TYPE {arg.upper()}\r\n".encode('utf-8'))
+                else:
+                    conn.sendall(b"501 Tham so TYPE khong hop le (A hoac I)\r\n")
+
+            elif cmd == "MODE":
+                # ==========================================
+                # CHẾ ĐỘ TRUYỀN (S = Stream, B = Block, C = Compressed)
+                # ==========================================
+                if arg.upper() in ['S', 'B', 'C']:
+                    active_clients[addr]["tran_mode"] = arg.upper()
+                    conn.sendall(f"200 Chuyen doi thanh cong sang che do MODE {arg.upper()}\r\n".encode('utf-8'))
+                else:
+                    conn.sendall(b"501 Tham so MODE khong hop le (S, B, C)\r\n")
 
             else:
                 conn.sendall(b"502 Lenh khong hop le\r\n")
