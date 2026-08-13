@@ -2,15 +2,25 @@ import hashlib
 import socket
 import threading
 import os
+import time
 from rdt_core import rdt_send, rdt_receive
 
 
 HOST = '127.0.0.1'
 PORT = 2121
 
+active_clients = {}
+
 def handle_client(conn, addr):
     print(f"[+] Có Client kết nối từ {addr}")
     conn.sendall(b"220 Chon Hybrid FTP Server xin chao\r\n")
+
+    # --- ĐĂNG KÝ CLIENT VÀO HỆ THỐNG ---
+    active_clients[addr] = {
+        "user": "Chưa rõ", 
+        "status": "Đang chờ đăng nhập", 
+        "mode": "-"
+    }
     
     is_logged_in = False
     client_udp_addr = None # Tọa độ dùng cho Active Mode
@@ -18,9 +28,12 @@ def handle_client(conn, addr):
     # 2 biến mới bổ sung phục vụ Passive Mode
     is_passive = False
     pasv_sock = None 
+
+    # Dùng biến phụ để lưu tạm tên user khi họ gõ lệnh USER
+    temp_user = ""
     
-    while True:
-        try:
+    try:
+        while True:
             data = conn.recv(1024).decode('utf-8').strip()
             if not data: break
             
@@ -30,10 +43,14 @@ def handle_client(conn, addr):
             arg = parts[1] if len(parts) > 1 else ""
             
             if cmd == "USER":
+                temp_user = arg # Lưu tạm tên user lại
                 conn.sendall(b"331 Username OK, can Password\r\n")
             elif cmd == "PASS":
                 if arg == "123456":
                     is_logged_in = True
+                    # --- CẬP NHẬT TRẠNG THÁI: ĐÃ ĐĂNG NHẬP ---
+                    active_clients[addr]["user"] = temp_user
+                    active_clients[addr]["status"] = "Đã đăng nhập"
                     conn.sendall(b"230 Dang nhap thanh cong\r\n")
                 else:
                     conn.sendall(b"530 Sai mat khau\r\n")
@@ -54,6 +71,7 @@ def handle_client(conn, addr):
                 
                 client_udp_addr = (ip, udp_port)
                 is_passive = False
+                active_clients[addr]["mode"] = "ACTIVE" # Cập nhật trạng thái mode
                 conn.sendall(b"200 PORT ghi nhan thanh cong\r\n")
                 print(f"[*] Da luu toa do UDP cua Client: {client_udp_addr}")
                 
@@ -70,6 +88,7 @@ def handle_client(conn, addr):
                 # Trả về câu thần chú 227 chứa IP và Port
                 conn.sendall(f"227 Entering Passive Mode (127,0,0,1,{p1},{p2})\r\n".encode('utf-8'))
                 is_passive = True
+                active_clients[addr]["mode"] = "PASSIVE" # Cập nhật trạng thái mode
                 print(f"[*] Da mo cong PASV o port {server_port}, dang cho Client...")
                 
             elif cmd == "RETR":
@@ -210,18 +229,42 @@ def handle_client(conn, addr):
                 conn.sendall(b"502 Lenh khong hop le\r\n")
 
                 
-        except ConnectionResetError:
-            break
-            
-    if pasv_sock: pasv_sock.close()
-    conn.close()
-    print(f"[-] Client {addr} ngat ket noi")
+    except ConnectionResetError:
+        pass
+    finally:
+        # --- DỌN DẸP KHI CLIENT THOÁT ---
+        if pasv_sock: pasv_sock.close()
+        conn.close()
+        if addr in active_clients:
+            del active_clients[addr] # Xóa khỏi danh sách theo dõi
+        print(f"[-] Client {addr} ngat ket noi")
+
+# --- HÀM THEO DÕI TRẠNG THÁI CLIENT (DASHBOARD) ---
+def monitor_dashboard():
+    while True:
+        time.sleep(10) # Cứ 10 giây in ra một lần
+        print("\n" + "="*50)
+        print(f" DANH SÁCH CLIENT ĐANG ONLINE (Tổng: {len(active_clients)})")
+        print("="*50)
+        print(f"{'IP:PORT':<20} | {'USERNAME':<10} | {'TRẠNG THÁI':<18} | {'CHẾ ĐỘ'}")
+        print("-" * 50)
+        
+        if not active_clients:
+            print("Không có ai đang kết nối...")
+        else:
+            for c_addr, info in active_clients.items():
+                addr_str = f"{c_addr[0]}:{c_addr[1]}"
+                print(f"{addr_str:<20} | {info['user']:<10} | {info['status']:<18} | {info['mode']}")
+        print("="*50 + "\n")
 
 # --- LUỒNG MAIN KHỞI ĐỘNG SERVER ---
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server.bind((HOST, PORT))
 server.listen(5)
 print(f"[*] BỘ NÃO TCP ĐANG CHẠY TẠI {HOST}:{PORT}")
+
+# Bật luồng Dashboard
+threading.Thread(target=monitor_dashboard, daemon=True).start()
 
 while True:
     conn, addr = server.accept()
