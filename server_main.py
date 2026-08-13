@@ -250,6 +250,31 @@ def handle_client(conn, addr):
                 else:
                     conn.sendall(b"501 Tham so MODE khong hop le (S, B, C)\r\n")
 
+            elif cmd == "NOOP":
+                # Lệnh giữ kết nối (Ping)
+                conn.sendall(b"200 OK\r\n")
+                
+            elif cmd == "PWD":
+                # Lệnh in ra đường dẫn thư mục hiện tại
+                current_dir = os.getcwd()
+                conn.sendall(f"257 \"{current_dir}\" is current directory\r\n".encode('utf-8'))
+                
+            elif cmd == "CWD":
+                # Lệnh di chuyển vào một thư mục cụ thể (Ví dụ: CWD /hinhanh)
+                try:
+                    os.chdir(arg)
+                    conn.sendall(b"250 CWD command successful\r\n")
+                except FileNotFoundError:
+                    conn.sendall(b"550 Khong tim thay thu muc\r\n")
+                    
+            elif cmd == "CDUP":
+                # Lệnh lùi lại thư mục cha (tương đương lệnh cd ..)
+                try:
+                    os.chdir("..")
+                    conn.sendall(b"250 CDUP command successful\r\n")
+                except Exception:
+                    conn.sendall(b"550 Khong the lui thu muc\r\n")
+
             else:
                 conn.sendall(b"502 Lenh khong hop le\r\n")
 
