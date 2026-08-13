@@ -398,11 +398,8 @@ class FTPClientGUI:
             res_list = self._send_cmd(self.tcp_sock, "LIST")
             if res_list.startswith("150"):
                 self.write_log("Đang hứng danh sách tập tin qua UDP...")
-                if not is_passive:
-                    data_sock.settimeout(5.0)
-                    _, s_addr = data_sock.recvfrom(1024)
-                    server_data_addr = s_addr
-                else:
+
+                if is_passive:
                     data_sock.sendto(b"READY", server_data_addr)
                     
                 save_name = "client_received_list.txt"
