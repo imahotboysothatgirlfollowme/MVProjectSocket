@@ -11,6 +11,24 @@ PORT = 2121
 
 active_clients = {}
 
+def get_safe_path(server_root, current_dir, requested_path):
+    """
+    Hàm chuẩn hóa và bảo vệ đường dẫn chống Path Traversal.
+    Trả về đường dẫn tuyệt đối nếu an toàn, ngược lại trả về None.
+    """
+    # 1. Chặn lỗi đường dẫn tuyệt đối: Xóa các dấu slash ở đầu chuỗi (vd: '/etc/passwd' -> 'etc/passwd')
+    # Tránh việc os.path.join tự động vứt bỏ thư mục hiện tại.
+    safe_requested = requested_path.lstrip('/\\')
+    
+    # 2. Tính toán đường dẫn đích thực sự
+    target_path = os.path.abspath(os.path.join(current_dir, safe_requested))
+    
+    # 3. Chốt chặn cuối cùng: Kiểm tra xem đích đến có nằm gọn trong SERVER_ROOT không?
+    if os.path.commonpath([server_root, target_path]) == server_root:
+        return target_path
+    
+    return None # Cảnh báo rủi ro: Đường dẫn vượt rào!
+
 def handle_client(conn, addr):
     print(f"[+] Có Client kết nối từ {addr}")
     conn.sendall(b"220 Chon Hybrid FTP Server xin chao\r\n")
@@ -113,60 +131,74 @@ def handle_client(conn, addr):
                 print(f"[*] Da mo cong PASV o port {server_port}, dang cho Client...")
                 
             elif cmd == "RETR":
-                # ==========================================
-                # XỬ LÝ LỆNH TẢI FILE CHO CẢ 2 CHẾ ĐỘ
-                # ==========================================
                 if not client_udp_addr and not is_passive:
                     conn.sendall(b"425 Vui long gui lenh PORT hoac PASV truoc\r\n")
                     continue
 
-                # Tính toán file dựa trên thư mục riêng của client
-                target_file = os.path.join(active_clients[addr]["current_dir"], arg)
-                if os.path.isfile(target_file):
+                # SỬ DỤNG HÀM BẢO VỆ ĐỂ LẤY TARGET FILE
+                target_file = get_safe_path(SERVER_ROOT, active_clients[addr]["current_dir"], arg)
+                
+                if target_file and os.path.isfile(target_file):
                     conn.sendall(b"150 File ton tai, dang mo luong UDP...\r\n")
+                    
+                    # ---> 1. CẬP NHẬT TRẠNG THÁI & ÉP IN RA MÀN HÌNH NGAY LẬP TỨC
+                    active_clients[addr]["status"] = f"Đang gửi: {arg[:8]}..."
+                    active_clients[addr]["mode"] = "PASSIVE" if is_passive else "ACTIVE"
+                    print_dashboard()
                     
                     # [TRICK UDP HOLE PUNCHING]: Dò sóng âm của Client
                     if is_passive and pasv_sock:
                         try:
-                            # Đợi tối đa 5 giây xem Client có "điểm danh" không
                             pasv_sock.settimeout(5.0)
                             _, c_addr = pasv_sock.recvfrom(1024)
-                            client_udp_addr = c_addr # Bắt được IP/Port của Client rồi!
-                            
-                            pasv_sock.close() # Lấy được rồi thì đóng cửa ngầm
+                            client_udp_addr = c_addr 
+                            pasv_sock.close() 
                             pasv_sock = None
                             print(f"[*] Bat duoc Client diem danh tu {client_udp_addr}")
                         except socket.timeout:
                             conn.sendall(b"426 Loi: Khong thay Client diem danh!\r\n")
+                            # Phải reset trạng thái nếu lỗi
+                            active_clients[addr]["status"] = "Lỗi timeout"
+                            print_dashboard()
                             continue
                     
                     print(f"[*] Dang ban file '{arg}' qua UDP...")
-                    # Dùng chung 1 hàm rdt_send ném file đi, dù là Active hay Passive
                     rdt_send(target_file, client_udp_addr)
                     
                     conn.sendall(b"226 Truyen file hoan tat\r\n")
                     
-                    # Truyền xong phải Reset lại thông tin để an toàn cho lần tải sau
+                    # ---> 2. RESET TRẠNG THÁI VÀ ÉP IN LẠI XÁC NHẬN ĐÃ XONG
+                    active_clients[addr]["status"] = "Rảnh rỗi"
+                    active_clients[addr]["mode"] = "-"
+                    print_dashboard()
+                    
                     client_udp_addr = None 
                     is_passive = False
                 else:
                     conn.sendall(b"550 Khong tim thay file\r\n")
 
             elif cmd == "STOR":
-                # ==========================================
-                # XỬ LÝ LỆNH UPLOAD TỪ CLIENT
-                # ==========================================
                 if not client_udp_addr and not is_passive:
                     conn.sendall(b"425 Vui long gui lenh PORT hoac PASV truoc\r\n")
                     continue
                 
-                # Để tránh đè file hệ thống, gắn thêm chữ 'server_recv_' vào tên file
-                client_dir = active_clients[addr]["current_dir"]
-                save_path = os.path.join(client_dir, f"server_recv_{arg}")
+                safe_filename = os.path.basename(arg)
+                save_path = get_safe_path(SERVER_ROOT, active_clients[addr]["current_dir"], f"server_recv_{safe_filename}")
+                
+                if not save_path:
+                    conn.sendall(b"553 Ten file khong hop le\r\n")
+                    continue
+                
                 conn.sendall(b"150 San sang nhan file, dang mo luong UDP...\r\n")
                 
+                # ---> 1. Cập nhật trạng thái
+                active_clients[addr]["status"] = f"Đang nhận: {safe_filename[:5]}..."
+                active_clients[addr]["mode"] = "PASSIVE" if is_passive else "ACTIVE"
+                
+                # ---> 2. ÉP IN RA MÀN HÌNH NGAY LẬP TỨC TRƯỚC KHI BỊ TREO BỞI UDP
+                print_dashboard()
+                
                 if not is_passive:
-                    # ACTIVE MODE: Server phải chủ động mở cổng UDP và ném chữ READY cho Client biết chỗ
                     temp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                     temp_sock.sendto(b"READY", client_udp_addr)
                     print(f"[*] Dang hung luong UDP tu Client (Active)...")
@@ -174,7 +206,6 @@ def handle_client(conn, addr):
                     rdt_receive(temp_sock, save_path)
                     temp_sock.close()
                 else:
-                    # PASSIVE MODE: Server đã mở cổng pasv_sock từ lúc Client gọi lệnh PASV rồi, cứ thế lấy ra hứng thôi
                     print(f"[*] Dang hung luong UDP tu Client (Passive)...")
                     rdt_receive(pasv_sock, save_path)
                     
@@ -185,7 +216,11 @@ def handle_client(conn, addr):
                 conn.sendall(b"226 Truyen file hoan tat\r\n")
                 print(f"[*] Đã nhận và lưu file thành công: {save_path}")
                 
-                # Reset trạng thái
+                # ---> 3. Reset trạng thái và ép in lại lần nữa để xác nhận xong
+                active_clients[addr]["status"] = "Rảnh rỗi"
+                active_clients[addr]["mode"] = "-" 
+                print_dashboard()
+                
                 client_udp_addr = None 
                 is_passive = False
 
@@ -199,11 +234,14 @@ def handle_client(conn, addr):
                 
                 conn.sendall(b"150 Bat dau gui danh sach file...\r\n")
                 
-                # Quét thư mục hiện tại của Server để lập danh sách
+                # ---> 1. CẬP NHẬT TRẠNG THÁI & ÉP IN RA MÀN HÌNH NGAY LẬP TỨC
+                active_clients[addr]["status"] = "Đang lấy danh sách"
+                active_clients[addr]["mode"] = "PASSIVE" if is_passive else "ACTIVE"
+                print_dashboard()
+                
                 listing = ""
-                client_dir = active_clients[addr]["current_dir"] # Lấy path riêng
+                client_dir = active_clients[addr]["current_dir"]
 
-                # Quét theo path riêng của client thay vì '.'
                 for f in os.listdir(client_dir):
                     full_path = os.path.join(client_dir, f)
                     if os.path.isfile(full_path):
@@ -212,7 +250,6 @@ def handle_client(conn, addr):
                     elif os.path.isdir(full_path):
                         listing += f"drwxr-xr-x 1 owner group        0 {f}\r\r\n"
 
-                # Mẹo nhỏ: Ghi nội dung ra file tạm để tận dụng hàm rdt_send có sẵn
                 temp_filename = "temp_server_list.txt"
                 with open(temp_filename, "w", encoding="utf-8") as tf:
                     tf.write(listing)
@@ -232,27 +269,31 @@ def handle_client(conn, addr):
                     os.remove(temp_filename)
                 
                 conn.sendall(b"226 Truyen danh sach hoan tat\r\n")
+                
+                # ---> 2. RESET TRẠNG THÁI VÀ ÉP IN LẠI XÁC NHẬN ĐÃ XONG
+                active_clients[addr]["status"] = "Rảnh rỗi"
+                active_clients[addr]["mode"] = "-"
+                print_dashboard()
+                
                 client_udp_addr = None
                 is_passive = False
 
             elif cmd == "HASH":
-                # ==========================================
-                # XỬ LÝ LỆNH KIỂM TRA MÃ BĂM SHA-256
-                # ==========================================
                 if not arg:
                     conn.sendall(b"501 Thieu ten file tham so\r\n")
                     continue
 
-                target_file = os.path.join(active_clients[addr]["current_dir"], arg)
-                if os.path.isfile(target_file):
+                # SỬ DỤNG HÀM BẢO VỆ
+                target_file = get_safe_path(SERVER_ROOT, active_clients[addr]["current_dir"], arg)
+                
+                if target_file and os.path.isfile(target_file):
                     hasher = hashlib.sha256()
-                    with open(target_file, "rb") as f: # Truyền target_file vào đây
+                    with open(target_file, "rb") as f: 
                         hasher.update(f.read())
                     digest = hasher.hexdigest()
                     conn.sendall(f"200 {digest}\r\n".encode('utf-8'))
-                    print(f"[*] Đã gửi SHA-256 của file '{arg}': {digest}")
                 else:
-                    conn.sendall(b"550 Khong tim thay file\r\n")
+                    conn.sendall(b"550 Khong tim thay file hoac truy cap bi tu choi\r\n")
 
             elif cmd == "TYPE":
                 # ==========================================
@@ -284,26 +325,24 @@ def handle_client(conn, addr):
                 conn.sendall(f"257 \"{client_dir}\" is current directory\r\n".encode('utf-8'))
                 
             elif cmd == "CWD":
-                # Nối đường dẫn hiện tại của client với thư mục họ muốn vào
-                target_dir = os.path.abspath(os.path.join(active_clients[addr]["current_dir"], arg))
+                # SỬ DỤNG HÀM BẢO VỆ
+                target_dir = get_safe_path(SERVER_ROOT, active_clients[addr]["current_dir"], arg)
                 
-                # Kiểm tra xem thư mục có tồn tại thật không
-                if os.path.isdir(target_dir):
+                if target_dir and os.path.isdir(target_dir):
                     active_clients[addr]["current_dir"] = target_dir
                     conn.sendall(b"250 CWD command successful\r\n")
                 else:
-                    conn.sendall(b"550 Khong tim thay thu muc\r\n")
+                    conn.sendall(b"550 Khong tim thay thu muc hoac khong co quyen truy cap\r\n")
                     
             elif cmd == "CDUP":
-                # Lùi lại 1 cấp từ thư mục hiện tại của client
-                target_dir = os.path.abspath(os.path.join(active_clients[addr]["current_dir"], ".."))
+                # Lùi 1 cấp ('..')
+                target_dir = get_safe_path(SERVER_ROOT, active_clients[addr]["current_dir"], "..")
                 
-                # (Tùy chọn) Chặn không cho lùi quá thư mục gốc của Server
-                if not target_dir.startswith(SERVER_ROOT):
-                    conn.sendall(b"550 Khong the lui thu muc (vuot qua Root)\r\n")
-                else:
+                if target_dir:
                     active_clients[addr]["current_dir"] = target_dir
                     conn.sendall(b"250 CDUP command successful\r\n")
+                else:
+                    conn.sendall(b"550 Khong the lui thu muc (Da cham day Root)\r\n")
 
             else:
                 conn.sendall(b"502 Lenh khong hop le\r\n")
@@ -320,22 +359,27 @@ def handle_client(conn, addr):
         print(f"[-] Client {addr} ngat ket noi")
 
 # --- HÀM THEO DÕI TRẠNG THÁI CLIENT (DASHBOARD) ---
+def print_dashboard():
+    """Hàm độc lập để in bảng trạng thái"""
+    print("\n" + "="*50)
+    print(f" DANH SÁCH CLIENT ĐANG ONLINE (Tổng: {len(active_clients)})")
+    print("="*50)
+    print(f"{'IP:PORT':<20} | {'USERNAME':<10} | {'TRẠNG THÁI':<18} | {'CHẾ ĐỘ'}")
+    print("-" * 50)
+    
+    if not active_clients:
+        print("Không có ai đang kết nối...")
+    else:
+        for c_addr, info in active_clients.items():
+            addr_str = f"{c_addr[0]}:{c_addr[1]}"
+            print(f"{addr_str:<20} | {info['user']:<10} | {info['status']:<18} | {info['mode']}")
+    print("="*50 + "\n")
+
 def monitor_dashboard():
+    """Luồng chạy ngầm vẫn giữ nhịp 10s cho các trạng thái treo"""
     while True:
-        time.sleep(10) # Cứ 10 giây in ra một lần
-        print("\n" + "="*50)
-        print(f" DANH SÁCH CLIENT ĐANG ONLINE (Tổng: {len(active_clients)})")
-        print("="*50)
-        print(f"{'IP:PORT':<20} | {'USERNAME':<10} | {'TRẠNG THÁI':<18} | {'CHẾ ĐỘ'}")
-        print("-" * 50)
-        
-        if not active_clients:
-            print("Không có ai đang kết nối...")
-        else:
-            for c_addr, info in active_clients.items():
-                addr_str = f"{c_addr[0]}:{c_addr[1]}"
-                print(f"{addr_str:<20} | {info['user']:<10} | {info['status']:<18} | {info['mode']}")
-        print("="*50 + "\n")
+        time.sleep(10) 
+        print_dashboard()
 
 # --- LUỒNG MAIN KHỞI ĐỘNG SERVER ---
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
