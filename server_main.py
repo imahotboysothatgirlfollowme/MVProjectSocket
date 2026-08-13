@@ -5,8 +5,8 @@ import os
 import time
 from rdt_core import rdt_send, rdt_receive
 
-
-HOST = '127.0.0.1'
+# (Lắng nghe từ tất cả các máy trong mạng LAN):
+HOST = '0.0.0.0'
 PORT = 2121
 
 active_clients = {}
@@ -80,15 +80,18 @@ def handle_client(conn, addr):
                 # NHÁNH 2: PASSIVE MODE (Tự mở cổng và báo cho Client)
                 # ==========================================
                 pasv_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                pasv_sock.bind(('127.0.0.1', 0))
+                pasv_sock.bind(('0.0.0.0', 0)) # Sửa thành 0.0.0.0
                 _, server_port = pasv_sock.getsockname()
+                
+                # Lấy IP LAN thực tế mà Server đang dùng để chat với Client này
+                my_lan_ip = conn.getsockname()[0]
+                ip_pasv = my_lan_ip.replace('.', ',')
                 
                 p1, p2 = server_port // 256, server_port % 256
                 
-                # Trả về câu thần chú 227 chứa IP và Port
-                conn.sendall(f"227 Entering Passive Mode (127,0,0,1,{p1},{p2})\r\n".encode('utf-8'))
+                # Gửi tọa độ mạng LAN thực tế thay vì 127.0.0.1
+                conn.sendall(f"227 Entering Passive Mode ({ip_pasv},{p1},{p2})\r\n".encode('utf-8'))
                 is_passive = True
-                active_clients[addr]["mode"] = "PASSIVE" # Cập nhật trạng thái mode
                 print(f"[*] Da mo cong PASV o port {server_port}, dang cho Client...")
                 
             elif cmd == "RETR":

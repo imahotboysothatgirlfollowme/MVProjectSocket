@@ -9,3 +9,8 @@ __pycache__/
 # Bỏ qua các file tạm trên Windows/Mac
 Thumbs.db
 .DS_Store
+
+# Bỏ qua các file bạn tải lên/tải xuống lúc test đồ án
+server_recv_*
+downloaded_*
+temp_server_list.txt
