@@ -2,7 +2,6 @@ import os
 import socket
 import hashlib
 import time
-import uuid
 from rdt_core import rdt_send, rdt_receive
 
 def get_safe_path(server_root, current_dir, requested_path):
@@ -21,20 +20,20 @@ class FTPCommandProcessor:
         self.write_log = write_log
         self.update_dashboard = update_dashboard
         
-        # Trạng thái phiên kết nối của từng Client được đóng gói an toàn
         self.is_logged_in = False
         self.client_udp_addr = None
         self.is_passive = False
         self.pasv_sock = None
         self.temp_user = ""
-        self.rename_from_path = None
 
     def process(self, data):
-        """Xử lý lệnh và trả về True (tiếp tục giữ kết nối) hoặc False (ngắt kết nối)"""
         parts = data.split(' ', 1)
         cmd = parts[0].upper()
         arg = parts[1] if len(parts) > 1 else ""
 
+        # ==========================================
+        # 1. NHÓM LỆNH CƠ BẢN (Đăng nhập & Thoát)
+        # ==========================================
         if cmd == "USER":
             self.temp_user = arg
             self.conn.sendall(b"331 Username OK, can Password\r\n")
@@ -51,11 +50,14 @@ class FTPCommandProcessor:
                 
         elif cmd == "QUIT":
             self.conn.sendall(b"221 Tam biet!\r\n")
-            return False # Báo hiệu cho vòng lặp ở server_core ngắt kết nối
+            return False 
         
         elif not self.is_logged_in:
             self.conn.sendall(b"530 Ban chua dang nhap\r\n")
         
+        # ==========================================
+        # 2. NHÓM LỆNH MẠNG (Advanced - Active/Passive)
+        # ==========================================
         elif cmd == "PORT":
             try:
                 p = arg.split(',')
@@ -68,7 +70,7 @@ class FTPCommandProcessor:
                 self.active_clients[self.addr]["mode"] = "ACTIVE"
                 self.update_dashboard()
                 self.conn.sendall(b"200 PORT ghi nhan thanh cong\r\n")
-                self.write_log(f"[*] Đã lưu tọa độ UDP của Client: {self.client_udp_addr}")
+                self.write_log(f"[*] Đã lưu tọa độ UDP (Active): {self.client_udp_addr}")
             except (IndexError, ValueError):
                 self.conn.sendall(b"501 Syntax error in parameters\r\n")
                 
@@ -85,8 +87,11 @@ class FTPCommandProcessor:
             self.is_passive = True
             self.active_clients[self.addr]["mode"] = "PASSIVE"
             self.update_dashboard()
-            self.write_log(f"[*] Đã mở cổng PASV ở port {server_port}, đang chờ Client...")
+            self.write_log(f"[*] Đã mở cổng PASV ở port {server_port}...")
             
+        # ==========================================
+        # 3. NHÓM LỆNH TRUYỀN DỮ LIỆU & BĂM (Excellent Core)
+        # ==========================================
         elif cmd == "RETR":
             if not self.client_udp_addr and not self.is_passive:
                 self.conn.sendall(b"425 Vui long gui lenh PORT hoac PASV truoc\r\n")
@@ -95,9 +100,7 @@ class FTPCommandProcessor:
             target_file = get_safe_path(self.server_root, self.active_clients[self.addr]["current_dir"], arg)
             if target_file and os.path.isfile(target_file):
                 self.conn.sendall(b"150 File ton tai, dang mo luong UDP...\r\n")
-                
                 self.active_clients[self.addr]["status"] = f"Đang gửi: {arg[:8]}..."
-                self.active_clients[self.addr]["mode"] = "PASSIVE" if self.is_passive else "ACTIVE"
                 self.update_dashboard()
                 
                 if self.is_passive and self.pasv_sock:
@@ -108,17 +111,15 @@ class FTPCommandProcessor:
                         self.pasv_sock.close() 
                         self.pasv_sock = None
                     except socket.timeout:
-                        self.conn.sendall(b"426 Loi: Khong thay Client diem danh!\r\n")
+                        self.conn.sendall(b"426 Loi Timeout\r\n")
                         self.active_clients[self.addr]["status"] = "Lỗi timeout"
                         self.update_dashboard()
                         return True
                 
-                self.write_log(f"[*] Đang bắn file '{arg}' qua UDP...")
                 rdt_send(target_file, self.client_udp_addr)
-                
                 self.conn.sendall(b"226 Truyen file hoan tat\r\n")
+                
                 self.active_clients[self.addr]["status"] = "Rảnh rỗi"
-                self.active_clients[self.addr]["mode"] = "-"
                 self.update_dashboard()
                 self.client_udp_addr = None 
                 self.is_passive = False
@@ -137,10 +138,8 @@ class FTPCommandProcessor:
                 self.conn.sendall(b"553 Ten file khong hop le\r\n")
                 return True
             
-            self.conn.sendall(b"150 San sang nhan file, dang mo luong UDP...\r\n")
-            
+            self.conn.sendall(b"150 San sang nhan file...\r\n")
             self.active_clients[self.addr]["status"] = f"Đang nhận: {safe_filename[:5]}..."
-            self.active_clients[self.addr]["mode"] = "PASSIVE" if self.is_passive else "ACTIVE"
             self.update_dashboard()
             
             if not self.is_passive:
@@ -155,7 +154,6 @@ class FTPCommandProcessor:
             
             self.conn.sendall(b"226 Truyen file hoan tat\r\n")
             self.active_clients[self.addr]["status"] = "Rảnh rỗi"
-            self.active_clients[self.addr]["mode"] = "-" 
             self.update_dashboard()
             self.client_udp_addr = None 
             self.is_passive = False
@@ -167,12 +165,10 @@ class FTPCommandProcessor:
             
             self.conn.sendall(b"150 Bat dau gui danh sach file...\r\n")
             self.active_clients[self.addr]["status"] = "Đang lấy danh sách"
-            self.active_clients[self.addr]["mode"] = "PASSIVE" if self.is_passive else "ACTIVE"
             self.update_dashboard()
             
             listing = ""
             client_dir = self.active_clients[self.addr]["current_dir"]
-
             for f in os.listdir(client_dir):
                 full_path = os.path.join(client_dir, f)
                 if os.path.isfile(full_path):
@@ -200,7 +196,6 @@ class FTPCommandProcessor:
             
             self.conn.sendall(b"226 Truyen danh sach hoan tat\r\n")
             self.active_clients[self.addr]["status"] = "Rảnh rỗi"
-            self.active_clients[self.addr]["mode"] = "-"
             self.update_dashboard()
             self.client_udp_addr = None
             self.is_passive = False
@@ -217,6 +212,9 @@ class FTPCommandProcessor:
             else:
                 self.conn.sendall(b"550 Khong tim thay file\r\n")
 
+        # ==========================================
+        # 4. NHÓM LỆNH THAO TÁC CƠ BẢN (Advanced)
+        # ==========================================
         elif cmd == "TYPE":
             if arg.upper() in ['A', 'I']:
                 self.active_clients[self.addr]["data_type"] = arg.upper()
@@ -224,18 +222,7 @@ class FTPCommandProcessor:
                 self.update_dashboard()
             else:
                 self.conn.sendall(b"501 TYPE (A hoac I)\r\n")
-
-        elif cmd == "MODE":
-            if arg.upper() in ['S', 'B', 'C']:
-                self.active_clients[self.addr]["tran_mode"] = arg.upper()
-                self.conn.sendall(f"200 MODE {arg.upper()}\r\n".encode('utf-8'))
-                self.update_dashboard()
-            else:
-                self.conn.sendall(b"501 MODE (S, B, C)\r\n")
-
-        elif cmd == "NOOP":
-            self.conn.sendall(b"200 OK\r\n")
-            
+                
         elif cmd == "PWD":
             client_dir = self.active_clients[self.addr]["current_dir"]
             self.conn.sendall(f"257 \"{client_dir}\" is current directory\r\n".encode('utf-8'))
@@ -255,74 +242,8 @@ class FTPCommandProcessor:
                 self.conn.sendall(b"250 CDUP OK\r\n")
             else:
                 self.conn.sendall(b"550 Khong the lui\r\n")
-                
-        # --- BỔ SUNG CÁC LỆNH DIRECTORY & FILE MANAGEMENT ---
-        elif cmd == "MKD":
-            target_dir = get_safe_path(self.server_root, self.active_clients[self.addr]["current_dir"], arg)
-            if target_dir and not os.path.exists(target_dir):
-                os.makedirs(target_dir)
-                self.conn.sendall(f"257 \"{arg}\" created\r\n".encode('utf-8'))
-            else:
-                self.conn.sendall(b"550 Loi tao thu muc\r\n")
-                
-        elif cmd == "RMD":
-            target_dir = get_safe_path(self.server_root, self.active_clients[self.addr]["current_dir"], arg)
-            if target_dir and os.path.isdir(target_dir):
-                try:
-                    os.rmdir(target_dir)
-                    self.conn.sendall(b"250 Xoa OK\r\n")
-                except:
-                    self.conn.sendall(b"550 Thu muc khong rong\r\n")
-            else:
-                self.conn.sendall(b"550 Loi duong dan\r\n")
-                
-        elif cmd == "DELE":
-            target_file = get_safe_path(self.server_root, self.active_clients[self.addr]["current_dir"], arg)
-            if target_file and os.path.isfile(target_file):
-                os.remove(target_file)
-                self.conn.sendall(b"250 Xoa file OK\r\n")
-            else:
-                self.conn.sendall(b"550 Khong tim thay file\r\n")
-                
-        elif cmd == "RNFR":
-            target_file = get_safe_path(self.server_root, self.active_clients[self.addr]["current_dir"], arg)
-            if target_file and os.path.exists(target_file):
-                self.rename_from_path = target_file
-                self.conn.sendall(b"350 File pending RNTO\r\n")
-            else:
-                self.conn.sendall(b"550 Khong tim thay file\r\n")
-                
-        elif cmd == "RNTO":
-            if not self.rename_from_path:
-                self.conn.sendall(b"503 Goi RNFR truoc\r\n")
-                return True
-            target_file = get_safe_path(self.server_root, self.active_clients[self.addr]["current_dir"], arg)
-            if target_file:
-                os.rename(self.rename_from_path, target_file)
-                self.conn.sendall(b"250 Doi ten OK\r\n")
-                self.rename_from_path = None
-            else:
-                self.conn.sendall(b"553 Ten dich loi\r\n")
-                
-        elif cmd == "SIZE":
-            target_file = get_safe_path(self.server_root, self.active_clients[self.addr]["current_dir"], arg)
-            if target_file and os.path.isfile(target_file):
-                self.conn.sendall(f"213 {os.path.getsize(target_file)}\r\n".encode('utf-8'))
-            else:
-                self.conn.sendall(b"550 File loi\r\n")
-                
-        elif cmd == "HELP":
-            self.conn.sendall(b"214-Supported cmds: USER PASS QUIT PORT PASV RETR STOR LIST...\r\n214 Help OK\r\n")
-            
-        elif cmd == "ABOR":
-            if self.pasv_sock:
-                self.pasv_sock.close()
-                self.pasv_sock = None
-            self.client_udp_addr = None
-            self.is_passive = False
-            self.conn.sendall(b"226 Abort successful.\r\n")
 
         else:
-            self.conn.sendall(b"502 Lenh chua ho tro\r\n")
+            self.conn.sendall(b"502 Lenh chua ho tro hoac khong can thiet cho Demo\r\n")
             
-        return True # Giữ kết nối sau khi xử lý xong lệnh
+        return True

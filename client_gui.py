@@ -107,6 +107,23 @@ class FTPClientGUI:
         self.btn_hash = ttk.Button(btn_container, text="Kiểm tra HASH", style="Action.TButton", state="disabled", command=self.verify_hash)
         self.btn_hash.grid(row=0, column=3, padx=(0, 10))
 
+        # ==========================================
+        # BỔ SUNG: THANH LỆNH TÙY CHỈNH (CUSTOM COMMAND BAR)
+        # ==========================================
+        cmd_frame = tk.Frame(content_frame, bg="#FFFFFF", bd=0)
+        cmd_frame.pack(fill=tk.X, pady=(0, 10), padx=15)
+
+        tk.Label(cmd_frame, text="Lệnh FTP tùy chỉnh (VD: PWD, CWD folder, TYPE I):", bg="#FFFFFF", font=("Segoe UI", 9, "bold"), fg="#374151").pack(side=tk.LEFT, padx=(0, 5))
+        
+        self.ent_custom_cmd = ttk.Entry(cmd_frame, font=("Consolas", 10), state="disabled")
+        self.ent_custom_cmd.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+
+        self.btn_send_cmd = ttk.Button(cmd_frame, text="Gửi (Enter)", style="Action.TButton", state="disabled", command=self.send_custom_cmd)
+        self.btn_send_cmd.pack(side=tk.LEFT, padx=5)
+
+        # Ràng buộc phím Enter để gửi lệnh cho tiện
+        self.ent_custom_cmd.bind("<Return>", lambda event: self.send_custom_cmd())
+
         # Khu vực Terminal Log (Giả lập màn hình code Console)
         log_frame = tk.Frame(content_frame, bg="#1E1E1E")
         log_frame.pack(fill=tk.BOTH, expand=True)
@@ -196,6 +213,11 @@ class FTPClientGUI:
                 self.btn_retr.config(state="normal")
                 self.btn_stor.config(state="normal")
                 self.btn_hash.config(state="normal")
+                
+                # ---> BỔ SUNG MỞ KHÓA THANH LỆNH:
+                self.ent_custom_cmd.config(state="normal")
+                self.btn_send_cmd.config(state="normal")
+                
                 # Đổi tên nút kết nối
                 self.btn_connect.config(text="Đã kết nối")
             else:
@@ -451,6 +473,39 @@ class FTPClientGUI:
                     self.write_log("Kiểm tra HASH: Không khớp (Mismatch)")
             else:
                 self.write_log("Lỗi từ Server khi yêu cầu HASH.")
+        threading.Thread(target=_task, daemon=True).start()
+
+    def send_custom_cmd(self):
+        """Hàm xử lý gửi lệnh FTP tự do từ thanh Custom Command"""
+        cmd_text = self.ent_custom_cmd.get().strip()
+        if not cmd_text:
+            return
+            
+        # Kiểm tra xem đã có kết nối TCP chưa
+        if not hasattr(self, 'tcp_sock') or self.btn_connect.cget('text') != "Đã kết nối":
+            messagebox.showwarning("Cảnh báo", "Bạn phải kết nối và đăng nhập trước!")
+            return
+            
+        def _task():
+            try:
+                # Vô hiệu hóa nút và ô nhập tạm thời trong lúc gửi
+                self.btn_send_cmd.config(state="disabled")
+                self.ent_custom_cmd.config(state="disabled")
+                
+                # Gửi lệnh đi (Hàm _send_cmd của bạn đã tự động in log ra màn hình)
+                self._send_cmd(self.tcp_sock, cmd_text)
+                
+                # Xóa chữ trong ô nhập sau khi gửi xong
+                self.ent_custom_cmd.delete(0, tk.END)
+                
+            except Exception as e:
+                self.write_log(f"LỖI GỬI LỆNH: {str(e)}")
+            finally:
+                # Bật lại ô nhập
+                self.ent_custom_cmd.config(state="normal")
+                self.btn_send_cmd.config(state="normal")
+                self.ent_custom_cmd.focus() # Trả lại trỏ chuột vào ô nhập
+
         threading.Thread(target=_task, daemon=True).start()
 
 if __name__ == "__main__":
