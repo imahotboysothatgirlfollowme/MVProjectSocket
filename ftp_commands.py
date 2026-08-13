@@ -263,26 +263,26 @@ class FTPCommandProcessor:
                 os.makedirs(target_dir)
                 self.conn.sendall(f"257 \"{arg}\" created\r\n".encode('utf-8'))
             else:
-                self.conn.sendall(b"550 Lỗi tạo thư mục\r\n")
+                self.conn.sendall(b"550 Loi tao thu muc\r\n")
                 
         elif cmd == "RMD":
             target_dir = get_safe_path(self.server_root, self.active_clients[self.addr]["current_dir"], arg)
             if target_dir and os.path.isdir(target_dir):
                 try:
                     os.rmdir(target_dir)
-                    self.conn.sendall(b"250 Xoá OK\r\n")
+                    self.conn.sendall(b"250 Xoa OK\r\n")
                 except:
-                    self.conn.sendall(b"550 Thư mục không rỗng\r\n")
+                    self.conn.sendall(b"550 Thu muc khong rong\r\n")
             else:
-                self.conn.sendall(b"550 Lỗi đường dẫn\r\n")
+                self.conn.sendall(b"550 Loi duong dan\r\n")
                 
         elif cmd == "DELE":
             target_file = get_safe_path(self.server_root, self.active_clients[self.addr]["current_dir"], arg)
             if target_file and os.path.isfile(target_file):
                 os.remove(target_file)
-                self.conn.sendall(b"250 Xoá file OK\r\n")
+                self.conn.sendall(b"250 Xoa file OK\r\n")
             else:
-                self.conn.sendall(b"550 Không tìm thấy file\r\n")
+                self.conn.sendall(b"550 Khong tim thay file\r\n")
                 
         elif cmd == "RNFR":
             target_file = get_safe_path(self.server_root, self.active_clients[self.addr]["current_dir"], arg)
@@ -290,26 +290,26 @@ class FTPCommandProcessor:
                 self.rename_from_path = target_file
                 self.conn.sendall(b"350 File pending RNTO\r\n")
             else:
-                self.conn.sendall(b"550 Không tìm thấy file\r\n")
+                self.conn.sendall(b"550 Khong tim thay file\r\n")
                 
         elif cmd == "RNTO":
             if not self.rename_from_path:
-                self.conn.sendall(b"503 Gọi RNFR trước\r\n")
+                self.conn.sendall(b"503 Goi RNFR truoc\r\n")
                 return True
             target_file = get_safe_path(self.server_root, self.active_clients[self.addr]["current_dir"], arg)
             if target_file:
                 os.rename(self.rename_from_path, target_file)
-                self.conn.sendall(b"250 Đổi tên OK\r\n")
+                self.conn.sendall(b"250 Doi ten OK\r\n")
                 self.rename_from_path = None
             else:
-                self.conn.sendall(b"553 Tên đích lỗi\r\n")
+                self.conn.sendall(b"553 Ten dich loi\r\n")
                 
         elif cmd == "SIZE":
             target_file = get_safe_path(self.server_root, self.active_clients[self.addr]["current_dir"], arg)
             if target_file and os.path.isfile(target_file):
                 self.conn.sendall(f"213 {os.path.getsize(target_file)}\r\n".encode('utf-8'))
             else:
-                self.conn.sendall(b"550 File lỗi\r\n")
+                self.conn.sendall(b"550 File loi\r\n")
                 
         elif cmd == "HELP":
             self.conn.sendall(b"214-Supported cmds: USER PASS QUIT PORT PASV RETR STOR LIST...\r\n214 Help OK\r\n")
