@@ -97,11 +97,10 @@ class FTPCommandProcessor:
                 
                 if self.is_passive and self.pasv_sock:
                     try:
-                        self.pasv_sock.settimeout(5.0)
+                        self.pasv_sock.settimeout(10.0) # TĂNG THỜI GIAN CHỜ LÊN 10 GIÂY
                         _, c_addr = self.pasv_sock.recvfrom(1024)
                         self.client_udp_addr = c_addr 
-                        self.pasv_sock.close() 
-                        self.pasv_sock = None
+                        # XÓA DÒNG self.pasv_sock.close() TẠI ĐÂY
                     except socket.timeout:
                         self.conn.sendall(b"426 Loi Timeout\r\n")
                         self.active_clients[self.addr]["status"] = "Lỗi timeout"
@@ -109,12 +108,18 @@ class FTPCommandProcessor:
                         self.update_dashboard()
                         return True
                 
-                rdt_send(target_file, self.client_udp_addr, current_type, speed_cb=self.update_speed)
+                # TRUYỀN THÊM udp_sock=self.pasv_sock VÀO HÀM RDT_SEND
+                rdt_send(target_file, self.client_udp_addr, current_type, speed_cb=self.update_speed, udp_sock=self.pasv_sock)
                 self.conn.sendall(b"226 Truyen file hoan tat\r\n")
                 
                 self.active_clients[self.addr]["status"] = "Rảnh rỗi"
                 self.active_clients[self.addr]["speed"] = "-"
                 self.update_dashboard()
+                
+                # XỬ LÝ ĐÓNG SOCKET MỘT CÁCH AN TOÀN SAU KHI ĐÃ GỬI FILE XONG
+                if self.is_passive and self.pasv_sock:
+                    self.pasv_sock.close()
+                    self.pasv_sock = None
                 self.client_udp_addr = None 
                 self.is_passive = False
             else:
@@ -177,20 +182,25 @@ class FTPCommandProcessor:
             
             if self.is_passive and self.pasv_sock:
                 try:
-                    self.pasv_sock.settimeout(5.0)
+                    self.pasv_sock.settimeout(10.0) # TĂNG THỜI GIAN LÊN 10 GIÂY
                     _, c_addr = self.pasv_sock.recvfrom(1024)
                     self.client_udp_addr = c_addr
-                    self.pasv_sock.close()
-                    self.pasv_sock = None
+                    # XÓA DÒNG self.pasv_sock.close() TẠI ĐÂY
                 except socket.timeout:
                     pass
             
-            rdt_send(temp_filename, self.client_udp_addr, speed_cb=self.update_speed)
+            # TRUYỀN THÊM udp_sock VÀO
+            rdt_send(temp_filename, self.client_udp_addr, speed_cb=self.update_speed, udp_sock=self.pasv_sock)
             if os.path.exists(temp_filename): os.remove(temp_filename)
             
             self.conn.sendall(b"226 Truyen danh sach hoan tat\r\n")
             self.active_clients[self.addr]["status"] = "Rảnh rỗi"
             self.update_dashboard()
+            
+            # ĐÓNG SOCKET PASV SAU KHI GỬI DANH SÁCH XONG
+            if self.is_passive and self.pasv_sock:
+                self.pasv_sock.close()
+                self.pasv_sock = None
             self.client_udp_addr = None
             self.is_passive = False
 

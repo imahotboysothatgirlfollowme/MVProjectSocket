@@ -22,8 +22,14 @@ def parse_packet(packet):
     seq_num, ack_num, flags, payload_len, checksum = struct.unpack(HEADER_FORMAT, header)
     return seq_num, ack_num, flags, payload_len, checksum, payload
 
-def rdt_send(filename, target_addr, data_type='I', speed_cb=None):
-    udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+def rdt_send(filename, target_addr, data_type='I', speed_cb=None, udp_sock=None):
+    close_sock_when_done = False
+    
+    # NẾU CÓ SOCKET TRUYỀN VÀO THÌ DÙNG LẠI, NẾU KHÔNG THÌ TẠO MỚI
+    if udp_sock is None:
+        udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        close_sock_when_done = True
+
     udp_sock.setblocking(False) 
     
     cwnd, ssthresh = 1.0, 16.0
@@ -32,73 +38,83 @@ def rdt_send(filename, target_addr, data_type='I', speed_cb=None):
     window_buffer = {}  
     
     if not os.path.exists(filename): return False
-    f = open(filename, "r", encoding="utf-8", newline=None) if data_type == 'A' else open(filename, "rb")
-
-    eof_reached = False
-    start_time = time.time()
     
-    # Đo tốc độ
-    measure_start = time.time()
-    bytes_acked_interval = 0
+    mode = "r" if data_type == 'A' else "rb"
+    encoding = "utf-8" if data_type == 'A' else None
 
-    while not eof_reached or base < next_seq_num:
-        current_window_size = int(cwnd)
-        while next_seq_num < base + current_window_size and not eof_reached:
-            if data_type == 'A':
-                chunk_str = f.read(CHUNK_SIZE // 2)
-                if not chunk_str:
-                    eof_reached = True
-                    break
-                chunk = chunk_str.replace('\n', '\r\n').encode('utf-8')
-            else:
-                chunk = f.read(CHUNK_SIZE)
-                if not chunk:
-                    eof_reached = True
-                    break 
-            
-            packet = make_packet(next_seq_num, 0, FLAG_DATA, chunk)
-            window_buffer[next_seq_num] = packet 
-            udp_sock.sendto(packet, target_addr)
-            
-            if base == next_seq_num: start_time = time.time()
-            next_seq_num += 1
+    # SỬA LỖI 1: Dùng 'with open' để tự động giải phóng file dù có lỗi xảy ra
+    with open(filename, mode, encoding=encoding, newline=None if data_type == 'A' else '') as f:
+        eof_reached = False
+        start_time = time.time()
+        
+        measure_start = time.time()
+        bytes_acked_interval = 0
 
-        try:
-            while True:
-                ack_data, _ = udp_sock.recvfrom(2048)
-                ack_seq, _, ack_flag, _, _, _ = parse_packet(ack_data)
+        while not eof_reached or base < next_seq_num:
+            current_window_size = int(cwnd)
+            while next_seq_num < base + current_window_size and not eof_reached:
+                if data_type == 'A':
+                    chunk_str = f.read(CHUNK_SIZE // 2)
+                    if not chunk_str:
+                        eof_reached = True
+                        break
+                    chunk = chunk_str.replace('\n', '\r\n').encode('utf-8')
+                else:
+                    chunk = f.read(CHUNK_SIZE)
+                    if not chunk:
+                        eof_reached = True
+                        break 
                 
-                if ack_flag == FLAG_ACK and ack_seq >= base:
-                    # Tính toán tốc độ dựa trên lượng gói tin đã xác nhận
-                    acked_count = (ack_seq - base + 1)
-                    bytes_acked_interval += acked_count * CHUNK_SIZE
-                    
-                    now = time.time()
-                    if now - measure_start >= 0.5:
-                        if speed_cb: speed_cb(f"{(bytes_acked_interval / 1024.0) / (now - measure_start):.1f} KB/s")
-                        measure_start = now
-                        bytes_acked_interval = 0
+                packet = make_packet(next_seq_num, 0, FLAG_DATA, chunk)
+                window_buffer[next_seq_num] = packet 
+                udp_sock.sendto(packet, target_addr)
+                
+                if base == next_seq_num: start_time = time.time()
+                next_seq_num += 1
 
-                    for i in range(base, ack_seq + 1):
-                        if i in window_buffer: del window_buffer[i]
+            # SỬA LỖI 2: Dùng select để socket chờ gói tin tới tối đa 0.01 giây
+            # Thao tác này nhường nhịp CPU cho OS, đưa mức ngốn CPU từ 100% xuống ~0%
+            ready_to_read, _, _ = select.select([udp_sock], [], [], 0.01)
+
+            if ready_to_read:
+                try:
+                    while True:
+                        ack_data, _ = udp_sock.recvfrom(2048)
+                        ack_seq, _, ack_flag, _, _, _ = parse_packet(ack_data)
+                        
+                        if ack_flag == FLAG_ACK and ack_seq >= base:
+                            acked_count = (ack_seq - base + 1)
+                            bytes_acked_interval += acked_count * CHUNK_SIZE
                             
-                    base = ack_seq + 1 
-                    start_time = time.time() 
-                    if cwnd < ssthresh: cwnd += 1.0
-                    else: cwnd += (1.0 / int(cwnd))
-        except BlockingIOError: pass 
+                            now = time.time()
+                            if now - measure_start >= 0.5:
+                                if speed_cb: speed_cb(f"{(bytes_acked_interval / 1024.0) / (now - measure_start):.1f} KB/s")
+                                measure_start = now
+                                bytes_acked_interval = 0
 
-        if base < next_seq_num and time.time() - start_time > TIMEOUT:
-            ssthresh = max(2.0, cwnd / 2.0)
-            cwnd = 1.0                      
-            for i in range(base, next_seq_num):
-                if i in window_buffer: udp_sock.sendto(window_buffer[i], target_addr)
-            start_time = time.time()
+                            for i in range(base, ack_seq + 1):
+                                if i in window_buffer: del window_buffer[i]
+                                    
+                            base = ack_seq + 1 
+                            start_time = time.time() 
+                            if cwnd < ssthresh: cwnd += 1.0
+                            else: cwnd += (1.0 / int(cwnd))
+                except BlockingIOError: 
+                    pass 
 
-    f.close()
+            # Xử lý Timeout Re-transmission (truyền lại)
+            if base < next_seq_num and time.time() - start_time > TIMEOUT:
+                ssthresh = max(2.0, cwnd / 2.0)
+                cwnd = 1.0                      
+                for i in range(base, next_seq_num):
+                    if i in window_buffer: udp_sock.sendto(window_buffer[i], target_addr)
+                start_time = time.time()
+
+    # Đoạn dọn dẹp kết nối EOF ở lại bên ngoài khối 'with'
     udp_sock.setblocking(True) 
     udp_sock.settimeout(2.0)
     eof_packet = make_packet(next_seq_num, 0, FLAG_EOF, b'EOF')
+    
     while True:
         udp_sock.sendto(eof_packet, target_addr)
         try:
@@ -108,7 +124,12 @@ def rdt_send(filename, target_addr, data_type='I', speed_cb=None):
         except (socket.timeout, ConnectionResetError): pass
     
     if speed_cb: speed_cb("0.0 KB/s")
-    udp_sock.close()
+    # SỬA LẠI LOGIC ĐÓNG SOCKET Ở CUỐI CÙNG
+    if close_sock_when_done:
+        udp_sock.close() # Chỉ đóng nếu rdt_send tự tạo ra nó
+    else:
+        udp_sock.setblocking(True) # Trả lại trạng thái blocking ban đầu cho socket dùng chung
+        
     return True
 
 def rdt_receive(udp_sock, save_filename, data_type='I', speed_cb=None):

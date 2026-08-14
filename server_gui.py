@@ -80,14 +80,18 @@ class FTPServerGUI:
         item = self.tree.item(selected[0])
         ip_port_str = item['values'][0]
         
-        from server_core import active_clients 
-        for addr, info in list(active_clients.items()):
-            if f"{addr[0]}:{addr[1]}" == ip_port_str:
-                try:
-                    info["conn"].close() # Ép đóng kết nối TCP của Socket này
-                    self.write_log(f"[!] Admin đã ngắt kết nối thủ công Client {ip_port_str}")
-                except Exception: pass
-                break
+        # IMPORT THÊM client_lock TỪ LÕI
+        from server_core import active_clients, client_lock 
+        
+        # BỌC KHÓA LẠI ĐỂ TRÁNH ĐỤNG ĐỘ KHI ADMIN ĐANG KICK MÀ CLIENT LẠI TỰ THOÁT
+        with client_lock:
+            for addr, info in list(active_clients.items()):
+                if f"{addr[0]}:{addr[1]}" == ip_port_str:
+                    try:
+                        info["conn"].close() 
+                        self.write_log(f"[!] Admin đã ngắt kết nối thủ công Client {ip_port_str}")
+                    except Exception: pass
+                    break
 
     def auto_refresh(self):
         self.update_dashboard()
@@ -95,14 +99,19 @@ class FTPServerGUI:
 
     def update_dashboard(self):
         def _refresh():
-            from server_core import active_clients 
+            # IMPORT THÊM client_lock TỪ LÕI
+            from server_core import active_clients, client_lock 
             for item in self.tree.get_children():
                 self.tree.delete(item)
             
-            for c_addr, info in active_clients.items():
+            # COPY DỮ LIỆU NHANH TRONG LÚC KHÓA ĐỂ TRÁNH LỖI DUYỆT
+            with client_lock:
+                clients_snap = list(active_clients.items())
+            
+            # DUYỆT VÀ VẼ LÊN GIAO DIỆN TỪ BẢN COPY (clients_snap)
+            for c_addr, info in clients_snap:
                 addr_str = f"{c_addr[0]}:{c_addr[1]}"
                 
-                # Tính toán Uptime (MM:SS)
                 duration = int(time.time() - info['connect_time'])
                 m, s = divmod(duration, 60)
                 h, m = divmod(m, 60)
