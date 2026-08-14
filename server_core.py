@@ -1,13 +1,13 @@
 import socket
 import threading
 import os
+import time
 from ftp_commands import FTPCommandProcessor
 
 HOST = '0.0.0.0'
 PORT = 2121
 SERVER_ROOT = os.path.abspath(os.getcwd())
 
-# Dictionary chứa trạng thái toàn cầu của các client
 active_clients = {}
 
 class FTPServerCore:
@@ -16,7 +16,6 @@ class FTPServerCore:
         self.update_dashboard = update_dashboard_callback
 
     def start(self):
-        """Hàm chạy Server (sẽ được nhúng vào luồng phụ để không treo GUI)"""
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server.bind((HOST, PORT))
         server.listen(5)
@@ -27,19 +26,19 @@ class FTPServerCore:
             threading.Thread(target=self.handle_client_thread, args=(conn, addr), daemon=True).start()
 
     def handle_client_thread(self, conn, addr):
-        """Luồng chuyên biệt xử lý riêng cho từng Client"""
         self.write_log(f"[+] Có Client kết nối từ {addr}")
         conn.sendall(b"220 Chon Hybrid FTP Server xin chao\r\n")
 
-        # Khởi tạo trạng thái cho Client mới
         active_clients[addr] = {
+            "conn": conn, 
             "user": "Chưa rõ", "status": "Đang chờ đăng nhập", 
-            "mode": "-", "data_type": "I", "tran_mode": "S",
-            "current_dir": SERVER_ROOT
+            "mode": "-", "current_dir": SERVER_ROOT,
+            "data_type": "I", # Dù ẩn trên GUI nhưng lõi xử lý file vẫn cần biến này
+            "connect_time": time.time(), 
+            "speed": "-"
         }
         self.update_dashboard()
 
-        # Gọi "chuyên gia" xử lý nghiệp vụ FTP từ file ftp_commands.py
         processor = FTPCommandProcessor(conn, addr, SERVER_ROOT, active_clients, self.write_log, self.update_dashboard)
 
         try:
@@ -48,14 +47,11 @@ class FTPServerCore:
                 if not data: break
                 
                 self.write_log(f"[{addr[1]}] Client ra lệnh: {data}")
-                
-                # Ném lệnh cho processor xử lý. Nếu nó trả về False (Lệnh QUIT), thì thoát vòng lặp.
                 keep_alive = processor.process(data)
-                if not keep_alive:
-                    break
+                if not keep_alive: break
                     
-        except ConnectionResetError:
-            self.write_log(f"[!] Client {addr} ngắt kết nối đột ngột.")
+        except (ConnectionResetError, ConnectionAbortedError):
+            self.write_log(f"[!] Client {addr} ngắt kết nối đột ngột hoặc bị Admin Kick.")
         finally:
             if processor.pasv_sock: processor.pasv_sock.close()
             conn.close()
