@@ -3,6 +3,7 @@ import os
 import struct
 import zlib
 import time
+import select
 
 HEADER_FORMAT = '!IIHHI'
 HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
@@ -39,11 +40,17 @@ def rdt_send(filename, target_addr, data_type='I', speed_cb=None, udp_sock=None)
     
     if not os.path.exists(filename): return False
     
-    mode = "r" if data_type == 'A' else "rb"
-    encoding = "utf-8" if data_type == 'A' else None
+    open_kwargs = {}
+    if data_type == 'A':
+        mode = "r"
+        open_kwargs['encoding'] = "utf-8"
+        open_kwargs['newline'] = None
+    else:
+        mode = "rb"
+        # Chế độ Binary tuyệt đối không truyền 'encoding' hay 'newline'
 
-    # SỬA LỖI 1: Dùng 'with open' để tự động giải phóng file dù có lỗi xảy ra
-    with open(filename, mode, encoding=encoding, newline=None if data_type == 'A' else '') as f:
+    # SỬA LỖI 1: Dùng 'with open' kết hợp kwargs để tự động cấu hình tham số
+    with open(filename, mode, **open_kwargs) as f:
         eof_reached = False
         start_time = time.time()
         
@@ -134,13 +141,19 @@ def rdt_send(filename, target_addr, data_type='I', speed_cb=None, udp_sock=None)
 
 def rdt_receive(udp_sock, save_filename, data_type='I', speed_cb=None):
     expected_seq = 0
-    mode = "w" if data_type == 'A' else "wb"
-    encoding = "utf-8" if data_type == 'A' else None
     
+    open_kwargs = {}
+    if data_type == 'A':
+        mode = "w"
+        open_kwargs['encoding'] = "utf-8"
+        open_kwargs['newline'] = None # Fix lỗi xuống dòng hỗn loạn trên Windows
+    else:
+        mode = "wb"
+
     measure_start = time.time()
     bytes_recv_interval = 0
 
-    with open(save_filename, mode, encoding=encoding) as f:
+    with open(save_filename, mode, **open_kwargs) as f:
         while True:
             try:
                 data, addr = udp_sock.recvfrom(2048) 
@@ -175,6 +188,19 @@ def rdt_receive(udp_sock, save_filename, data_type='I', speed_cb=None):
                     if expected_seq > 0:
                         ack_packet = make_packet(expected_seq - 1, expected_seq - 1, FLAG_ACK, b'')
                         udp_sock.sendto(ack_packet, addr)
-            except Exception:
+            # Thay thế except Exception: pass bằng đoạn sau:
+            except (BlockingIOError, socket.timeout):
+                # Bỏ qua an toàn: Gói tin đơn giản là chưa tới
+                pass 
+            except (struct.error, zlib.error):
+                # Bỏ qua an toàn: Gói tin bị hỏng form hoặc sai checksum trong quá trình truyền
                 pass
+            except ConnectionResetError:
+                # NGHIÊM TRỌNG: Đầu kia đã sập hoặc ngắt kết nối đột ngột
+                print("[!] Lỗi mạng: Client đã ngắt kết nối đột ngột.")
+                break 
+            except Exception as e:
+                # NHỮNG LỖI LẠ (Lỗi code, v.v.) BẮT BUỘC PHẢI IN RA ĐỂ CÒN SỬA
+                print(f"[!] LỖI NGHIÊM TRỌNG TRONG QUÁ TRÌNH NHẬN RDT: {e}")
+                break
     if speed_cb: speed_cb("0.0 KB/s")

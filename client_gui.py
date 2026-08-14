@@ -120,27 +120,42 @@ class FTPClientGUI:
         return response
 
     def _login_flow(self, ip, port, user, password):
+        login_success = False # THÊM CỜ TRẠNG THÁI ĐĂNG NHẬP
         self.tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             self.write_log(f"Đang kết nối đến {ip}:{port}...")
             self.tcp_sock.connect((ip, port))
             self.write_log(self.tcp_sock.recv(1024).decode('utf-8').strip(), is_client=False)
             
-            if not self._send_cmd(self.tcp_sock, f"USER {user}").startswith("331"): raise Exception("Server từ chối Username!")
+            if not self._send_cmd(self.tcp_sock, f"USER {user}").startswith("331"): 
+                raise Exception("Server từ chối Username!")
+                
             if self._send_cmd(self.tcp_sock, f"PASS {password}").startswith("230"):
                 self.write_log("ĐĂNG NHẬP THÀNH CÔNG! Đang đổ dữ liệu cây thư mục...")
                 self.btn_list.config(state="normal")
                 self.btn_stor.config(state="normal")
                 self.btn_connect.config(text="Đã kết nối")
                 
+                login_success = True # ĐÁNH DẤU ĐĂNG NHẬP THÀNH CÔNG
+                
                 # TỰ ĐỘNG GỌI LIST SAU KHI LOGIN
                 self.root.after(500, self.list_files)
             else:
                 raise Exception("Sai mật khẩu hoặc bị từ chối!")
+                
+        except ConnectionRefusedError:
+            messagebox.showerror("Lỗi Kết Nối", "Server từ chối kết nối. Hãy kiểm tra lại IP/Port hoặc đảm bảo Server đang mở.")
+            self.btn_connect.config(state="normal", text="Kết nối Server")
+        except TimeoutError:
+            messagebox.showerror("Lỗi Mạng", "Kết nối quá hạn (Timeout). Server không phản hồi.")
+            self.btn_connect.config(state="normal", text="Kết nối Server")
         except Exception as e:
             messagebox.showerror("Lỗi", f"Không thể kết nối hoặc đăng nhập:\n{str(e)}")
             self.btn_connect.config(state="normal", text="Kết nối Server")
-            if hasattr(self, 'tcp_sock'): self.tcp_sock.close()
+        finally:
+            # SỬ DỤNG CỜ ĐỂ KIỂM TRA: CHỈ ĐÓNG KHI THẤT BẠI
+            if not login_success and hasattr(self, 'tcp_sock'): 
+                self.tcp_sock.close()
 
     def list_files(self):
         threading.Thread(target=self._list_flow, daemon=True).start()
@@ -176,8 +191,15 @@ class FTPClientGUI:
                 
                 if os.path.exists(save_name): os.remove(save_name)
                 self.write_log(self.tcp_sock.recv(1024).decode('utf-8').strip(), is_client=False)
+        # Thay vì except Exception as e: ...
+        except ConnectionResetError:
+            self.write_log("Lỗi Mạng: Giao tiếp TCP bị Server ngắt đột ngột.", is_client=True)
+        except socket.timeout:
+            self.write_log("Lỗi Mạng: Quá thời gian chờ luồng UDP.", is_client=True)
+        except OSError as e:
+            self.write_log(f"Lỗi File/Đường dẫn: Hệ điều hành từ chối thao tác file ({e})", is_client=True)
         except Exception as e:
-            self.write_log(f"Lỗi lấy danh sách: {e}")
+            self.write_log(f"Lỗi không xác định khi tải về: {e}", is_client=True)
         finally:
             data_sock.close()
 
@@ -263,8 +285,17 @@ class FTPClientGUI:
                 rdt_receive(data_sock, save_path, self.client_data_type)
                 self.write_log(self.tcp_sock.recv(1024).decode('utf-8').strip(), is_client=False)
                 self.write_log(f"Đã lưu file: {save_path}")
-        except Exception as e: self.write_log(f"Lỗi tải về: {e}")
-        finally: data_sock.close()
+        # Thay vì except Exception as e: ...
+        except ConnectionResetError:
+            self.write_log("Lỗi Mạng: Giao tiếp TCP bị Server ngắt đột ngột.", is_client=True)
+        except socket.timeout:
+            self.write_log("Lỗi Mạng: Quá thời gian chờ luồng UDP.", is_client=True)
+        except OSError as e:
+            self.write_log(f"Lỗi File/Đường dẫn: Hệ điều hành từ chối thao tác file ({e})", is_client=True)
+        except Exception as e:
+            self.write_log(f"Lỗi không xác định khi tải về: {e}", is_client=True)
+        finally:
+            data_sock.close()
 
     def _upload_flow(self, filepath):
         try:
@@ -295,8 +326,17 @@ class FTPClientGUI:
                 self.write_log(self.tcp_sock.recv(1024).decode('utf-8').strip(), is_client=False)
                 self.write_log(f"Upload hoàn tất: {filename}")
                 self.list_files() # XONG UPLOAD -> ÉP LÀM MỚI DANH SÁCH FILE NGAY
-        except Exception as e: self.write_log(f"Lỗi Upload: {e}")
-        finally: data_sock.close()
+        # Thay vì except Exception as e: ...
+        except ConnectionResetError:
+            self.write_log("Lỗi Mạng: Giao tiếp TCP bị Server ngắt đột ngột.", is_client=True)
+        except socket.timeout:
+            self.write_log("Lỗi Mạng: Quá thời gian chờ luồng UDP.", is_client=True)
+        except OSError as e:
+            self.write_log(f"Lỗi File/Đường dẫn: Hệ điều hành từ chối thao tác file ({e})", is_client=True)
+        except Exception as e:
+            self.write_log(f"Lỗi không xác định khi tải về: {e}", is_client=True)
+        finally:
+            data_sock.close()
 
 if __name__ == "__main__":
     root = tk.Tk()
