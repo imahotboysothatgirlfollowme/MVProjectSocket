@@ -15,7 +15,7 @@ class FTPClientGUI:
         self.build_ui()
 
     def build_ui(self):
-        self.root.title("Hybrid FTP Client - Smart File Browser")
+        self.root.title("Hybrid FTP Client")
         self.root.geometry("1000x650")
         self.root.minsize(900, 600)
         self.root.configure(bg="#F3F4F6")
@@ -68,6 +68,10 @@ class FTPClientGUI:
         self.btn_stor = ttk.Button(btn_container, text="⬆️ Tải lên (Upload)", style="Action.TButton", state="disabled", command=self.upload_file)
         self.btn_stor.grid(row=0, column=1, padx=(0, 10))
 
+        # === THÊM MỚI: Nút HASH đặt cạnh nút Upload ===
+        self.btn_hash = ttk.Button(btn_container, text="🔍 Kiểm tra Hash", style="Action.TButton", state="disabled", command=self.on_hash_button_click)
+        self.btn_hash.grid(row=0, column=2, padx=(0, 10))
+
         # === KHUNG FILE BROWSER MỚI (THAY THẾ CHỖ GÕ LỆNH) ===
         browser_frame = tk.Frame(content_frame, bg="#FFFFFF", bd=0, highlightbackground="#D1D5DB", highlightthickness=1)
         browser_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
@@ -88,6 +92,14 @@ class FTPClientGUI:
         
         self.file_tree.bind("<Double-1>", self.on_tree_double_click)
 
+        # === THÊM MỚI: Bắt sự kiện click chọn dòng để bật/tắt nút HASH ===
+        self.file_tree.bind("<<TreeviewSelect>>", self.on_tree_select)
+
+        # THÊM MỚI: Khởi tạo Menu chuột phải
+        self.file_tree.bind("<Button-3>", self.show_context_menu)
+        self.context_menu = tk.Menu(self.root, tearoff=0)
+        self.context_menu.add_command(label="Kiểm tra mã băm (SHA-256)", command=self.check_server_hash)
+
         # Log Terminal thu nhỏ xuống dưới
         log_frame = tk.Frame(content_frame, bg="#1E1E1E", height=120)
         log_frame.pack(fill=tk.X)
@@ -100,13 +112,19 @@ class FTPClientGUI:
         self.write_log("Khởi tạo Hybrid FTP Client thành công. Sẵn sàng kết nối...", is_client=True)
 
     def write_log(self, message, is_client=True):
-        self.log_area.config(state='normal')
-        tag = "client" if is_client else "server"
-        prefix = "➜ " if is_client else "✓ "
-        if message.startswith("===") or message.startswith("❌") or message.startswith("✅"): prefix = ""
-        self.log_area.insert(tk.END, f"{prefix}{message}\n", tag)
-        self.log_area.see(tk.END)
-        self.log_area.config(state='disabled')
+        # Bọc logic cập nhật UI vào một hàm con
+        def _append_log():
+            self.log_area.config(state='normal')
+            tag = "client" if is_client else "server"
+            prefix = "➜ " if is_client else "✓ "
+            if message.startswith("===") or message.startswith("❌") or message.startswith("✅"): 
+                prefix = ""
+            self.log_area.insert(tk.END, f"{prefix}{message}\n", tag)
+            self.log_area.see(tk.END)
+            self.log_area.config(state='disabled')
+            
+        # Đẩy hàm con này cho luồng chính (Main Thread) của Tkinter xử lý
+        self.root.after(0, _append_log)
 
     def start_connection(self):
         self.btn_connect.config(state="disabled")
@@ -120,8 +138,19 @@ class FTPClientGUI:
         return response
 
     def _login_flow(self, ip, port, user, password):
-        login_success = False # THÊM CỜ TRẠNG THÁI ĐĂNG NHẬP
+        login_success = False 
         self.tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        
+        # Các hàm phụ trợ để luồng chính xử lý UI an toàn
+        def _ui_login_success():
+            self.btn_list.config(state="normal")
+            self.btn_stor.config(state="normal")
+            self.btn_connect.config(text="Đã kết nối")
+            
+        def _ui_login_error(title, msg):
+            messagebox.showerror(title, msg)
+            self.btn_connect.config(state="normal", text="Kết nối Server")
+
         try:
             self.write_log(f"Đang kết nối đến {ip}:{port}...")
             self.tcp_sock.connect((ip, port))
@@ -132,28 +161,23 @@ class FTPClientGUI:
                 
             if self._send_cmd(self.tcp_sock, f"PASS {password}").startswith("230"):
                 self.write_log("ĐĂNG NHẬP THÀNH CÔNG! Đang đổ dữ liệu cây thư mục...")
-                self.btn_list.config(state="normal")
-                self.btn_stor.config(state="normal")
-                self.btn_connect.config(text="Đã kết nối")
                 
-                login_success = True # ĐÁNH DẤU ĐĂNG NHẬP THÀNH CÔNG
+                # Báo luồng chính cập nhật nút bấm
+                self.root.after(0, _ui_login_success)
                 
-                # TỰ ĐỘNG GỌI LIST SAU KHI LOGIN
+                login_success = True 
+                
                 self.root.after(500, self.list_files)
             else:
                 raise Exception("Sai mật khẩu hoặc bị từ chối!")
                 
         except ConnectionRefusedError:
-            messagebox.showerror("Lỗi Kết Nối", "Server từ chối kết nối. Hãy kiểm tra lại IP/Port hoặc đảm bảo Server đang mở.")
-            self.btn_connect.config(state="normal", text="Kết nối Server")
+            self.root.after(0, lambda: _ui_login_error("Lỗi Kết Nối", "Server từ chối kết nối. Hãy kiểm tra lại IP/Port hoặc đảm bảo Server đang mở."))
         except TimeoutError:
-            messagebox.showerror("Lỗi Mạng", "Kết nối quá hạn (Timeout). Server không phản hồi.")
-            self.btn_connect.config(state="normal", text="Kết nối Server")
+            self.root.after(0, lambda: _ui_login_error("Lỗi Mạng", "Kết nối quá hạn (Timeout). Server không phản hồi."))
         except Exception as e:
-            messagebox.showerror("Lỗi", f"Không thể kết nối hoặc đăng nhập:\n{str(e)}")
-            self.btn_connect.config(state="normal", text="Kết nối Server")
+            self.root.after(0, lambda: _ui_login_error("Lỗi", f"Không thể kết nối hoặc đăng nhập:\n{str(e)}"))
         finally:
-            # SỬ DỤNG CỜ ĐỂ KIỂM TRA: CHỈ ĐÓNG KHI THẤT BẠI
             if not login_success and hasattr(self, 'tcp_sock'): 
                 self.tcp_sock.close()
 
@@ -256,6 +280,91 @@ class FTPClientGUI:
         if res.startswith("250"):
             self.list_files() # Gọi refresh lại Treeview sau khi đổi thư mục thành công
 
+    def on_tree_select(self, event):
+        """Hàm này tự động chạy khi người dùng bấm vào 1 dòng trên giao diện"""
+        selection = self.file_tree.selection()
+        if selection:
+            # Lấy thông tin dòng đang được chọn
+            values = self.file_tree.item(selection[0], "values")
+            # values[2] lưu loại ("File" hoặc "Folder")
+            if values[2] == "File":
+                # Nếu là File -> Cho phép bấm nút
+                self.btn_hash.config(state="normal")
+            else:
+                # Nếu là Folder -> Làm mờ nút
+                self.btn_hash.config(state="disabled")
+        else:
+            self.btn_hash.config(state="disabled")
+
+    def on_hash_button_click(self):
+        """Xử lý khi người dùng bấm vào nút Kiểm tra Hash"""
+        selection = self.file_tree.selection()
+        if not selection: return
+        
+        # values[3] chứa tên file thật trên Server (không có icon)
+        server_filename = self.file_tree.item(selection[0], "values")[3] 
+        
+        # BƯỚC 1: Mở hộp thoại chọn file từ máy tính (Bắt buộc chạy trên luồng chính của UI)
+        local_filepath = filedialog.askopenfilename(
+            title=f"Chọn file dưới máy tính để so sánh với '{server_filename}'"
+        )
+        
+        if local_filepath: # Nếu người dùng chọn file (không bấm Cancel)
+            # BƯỚC 2: Khởi chạy luồng phụ để tính toán Hash và gọi mạng (Giúp UI không bị đơ)
+            threading.Thread(
+                target=self._compare_hash_flow, 
+                args=(server_filename, local_filepath), 
+                daemon=True
+            ).start()
+
+    def _compare_hash_flow(self, server_filename, local_filepath):
+        """Luồng chạy ngầm để tính toán và đối chiếu mã băm"""
+        try:
+            local_name = os.path.basename(local_filepath)
+            self.write_log(f"Đang tính mã băm SHA-256 cho file local: {local_name}...")
+            
+            # Tính mã băm local (Đọc từng chunk 4KB để không làm tràn RAM nếu file nặng vài GB)
+            hasher = hashlib.sha256()
+            with open(local_filepath, "rb") as f:
+                for chunk in iter(lambda: f.read(4096), b""):
+                    hasher.update(chunk)
+            local_hash = hasher.hexdigest()
+            
+            # Gọi Server để lấy mã băm
+            self.write_log(f"Đang yêu cầu mã băm từ Server cho file: {server_filename}...")
+            res = self._send_cmd(self.tcp_sock, f"HASH {server_filename}")
+            
+            if res.startswith("200"):
+                server_hash = res.split(" ", 1)[1]
+                
+                # So sánh và báo cáo (Dùng root.after để gọi hộp thoại an toàn trên Main Thread)
+                def show_result():
+                    if local_hash == server_hash:
+                        messagebox.showinfo(
+                            "✅ Khớp hoàn toàn", 
+                            f"Mã băm SHA-256 trùng khớp 100%!\n\n"
+                            f"File Server: {server_filename}\n"
+                            f"File Local : {local_name}\n\n"
+                            f"Hash: {server_hash}"
+                        )
+                        self.write_log("Kết quả HASH: Khớp 100%. File đảm bảo toàn vẹn tuyệt đối.")
+                    else:
+                        messagebox.showwarning(
+                            "❌ Lệch mã băm", 
+                            f"CẢNH BÁO: Mã băm không khớp! Dữ liệu có thể đã bị sửa đổi hoặc lỗi.\n\n"
+                            f"Server Hash: {server_hash}\n"
+                            f"Local Hash : {local_hash}"
+                        )
+                        self.write_log("Kết quả HASH: Cảnh báo lệch mã băm!")
+                        
+                self.root.after(0, show_result)
+            else:
+                self.root.after(0, lambda: messagebox.showerror("Lỗi", "Server từ chối tính mã băm hoặc file không tồn tại."))
+                
+        except Exception as e:
+            self.write_log(f"Lỗi khi so sánh HASH: {e}")
+            self.root.after(0, lambda: messagebox.showerror("Lỗi hệ thống", f"Không thể hoàn tất kiểm tra HASH:\n{str(e)}"))
+
     def upload_file(self):
         filepath = filedialog.askopenfilename(title="Chọn file tải lên Server")
         if filepath: threading.Thread(target=self._upload_flow, args=(filepath,), daemon=True).start()
@@ -285,6 +394,24 @@ class FTPClientGUI:
                 rdt_receive(data_sock, save_path, self.client_data_type)
                 self.write_log(self.tcp_sock.recv(1024).decode('utf-8').strip(), is_client=False)
                 self.write_log(f"Đã lưu file: {save_path}")
+
+                # === BẮT ĐẦU PHẦN CODE AUTO-VERIFY THÊM VÀO ===
+                self.write_log("Đang kiểm tra tính toàn vẹn của file tải về...")
+                hash_res = self._send_cmd(self.tcp_sock, f"HASH {filename}")
+                if hash_res.startswith("200"):
+                    server_hash = hash_res.split(" ", 1)[1]
+                    
+                    # Tự tính mã băm file local vừa tải về
+                    hasher = hashlib.sha256()
+                    with open(save_path, "rb") as f:
+                        hasher.update(f.read())
+                    local_hash = hasher.hexdigest()
+                    
+                    if server_hash == local_hash:
+                        self.write_log("TẢI THÀNH CÔNG: Mã băm SHA-256 khớp 100%. File toàn vẹn.")
+                    else:
+                        self.write_log(f"CẢNH BÁO: File bị hỏng!\n- Server: {server_hash[:15]}...\n- Client: {local_hash[:15]}...")
+                # === KẾT THÚC PHẦN AUTO-VERIFY ===
         # Thay vì except Exception as e: ...
         except ConnectionResetError:
             self.write_log("Lỗi Mạng: Giao tiếp TCP bị Server ngắt đột ngột.", is_client=True)
@@ -296,6 +423,39 @@ class FTPClientGUI:
             self.write_log(f"Lỗi không xác định khi tải về: {e}", is_client=True)
         finally:
             data_sock.close()
+
+    def show_context_menu(self, event):
+        item = self.file_tree.identify_row(event.y)
+        if item:
+            self.file_tree.selection_set(item)
+            values = self.file_tree.item(item, "values")
+            # Chỉ hiện Menu nếu click vào File, bỏ qua Folder
+            if values[2] == "File": 
+                self.context_menu.tk_popup(event.x_root, event.y_root)
+
+    def check_server_hash(self):
+        item = self.file_tree.selection()
+        if not item: return
+        # Lấy tên file thực tế
+        filename = self.file_tree.item(item[0], "values")[3] 
+        threading.Thread(target=self._hash_flow, args=(filename,), daemon=True).start()
+
+    def _hash_flow(self, filename):
+        try:
+            self.write_log(f"Đang yêu cầu Server tính mã SHA-256 cho: {filename}...")
+            res = self._send_cmd(self.tcp_sock, f"HASH {filename}")
+            
+            if res.startswith("200"):
+                server_hash = res.split(" ", 1)[1]
+                # Dùng luồng chính để hiển thị UI an toàn
+                self.root.after(0, lambda: messagebox.showinfo(
+                    "Mã băm SHA-256", 
+                    f"Tên file: {filename}\n\nSHA-256 (Trên Server):\n{server_hash}"
+                ))
+            else:
+                self.root.after(0, lambda: messagebox.showerror("Lỗi", "Server từ chối tính mã băm."))
+        except Exception as e:
+            self.write_log(f"Lỗi khi yêu cầu HASH: {e}")
 
     def _upload_flow(self, filepath):
         try:

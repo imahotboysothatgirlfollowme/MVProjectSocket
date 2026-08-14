@@ -7,7 +7,7 @@ from server_core import FTPServerCore
 class FTPServerGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Hybrid FTP Server - Clean UI")
+        self.root.title("Hybrid FTP Server")
         self.root.geometry("900x600")
         self.root.minsize(800, 500)
         self.root.configure(bg="#1E1E1E") 
