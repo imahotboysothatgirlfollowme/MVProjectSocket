@@ -26,7 +26,6 @@ def parse_packet(packet):
 def rdt_send(filename, target_addr, data_type='I', speed_cb=None, udp_sock=None):
     close_sock_when_done = False
     
-    # NẾU CÓ SOCKET TRUYỀN VÀO THÌ DÙNG LẠI, NẾU KHÔNG THÌ TẠO MỚI
     if udp_sock is None:
         udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         close_sock_when_done = True
@@ -40,18 +39,10 @@ def rdt_send(filename, target_addr, data_type='I', speed_cb=None, udp_sock=None)
     
     if not os.path.exists(filename): return False
     
-    open_kwargs = {}
-    if data_type == 'A':
-        mode = "r"
-        open_kwargs['encoding'] = "utf-8"
-        open_kwargs['newline'] = None
-    else:
-        mode = "rb"
-        # Chế độ Binary tuyệt đối không truyền 'encoding' hay 'newline'
-
-    # SỬA LỖI 1: Dùng 'with open' kết hợp kwargs để tự động cấu hình tham số
-    with open(filename, mode, **open_kwargs) as f:
+    # LUÔN MỞ Ở CHẾ ĐỘ NHỊ PHÂN (BINARY) ĐỂ QUẢN LÝ CHÍNH XÁC SỐ LƯỢNG BYTE
+    with open(filename, "rb") as f:
         eof_reached = False
+        leftover_bytes = b"" # Bộ đệm xử lý riêng cho chế độ ASCII
         start_time = time.time()
         
         measure_start = time.time()
@@ -60,13 +51,24 @@ def rdt_send(filename, target_addr, data_type='I', speed_cb=None, udp_sock=None)
         while not eof_reached or base < next_seq_num:
             current_window_size = int(cwnd)
             while next_seq_num < base + current_window_size and not eof_reached:
+                
                 if data_type == 'A':
-                    chunk_str = f.read(CHUNK_SIZE // 2)
-                    if not chunk_str:
-                        eof_reached = True
+                    # CHẾ ĐỘ ASCII: Chuyển đổi ký tự xuống dòng ở cấp độ Byte và ép chẵn kích thước
+                    while len(leftover_bytes) < CHUNK_SIZE and not eof_reached:
+                        raw_chunk = f.read(CHUNK_SIZE)
+                        if not raw_chunk:
+                            eof_reached = True
+                            break
+                        # Chuyển đổi an toàn: đưa về \n trước, sau đó mới ép sang \r\n
+                        processed = raw_chunk.replace(b'\r\n', b'\n').replace(b'\n', b'\r\n')
+                        leftover_bytes += processed
+                        
+                    chunk = leftover_bytes[:CHUNK_SIZE]
+                    leftover_bytes = leftover_bytes[CHUNK_SIZE:]
+                    if not chunk: 
                         break
-                    chunk = chunk_str.replace('\n', '\r\n').encode('utf-8')
                 else:
+                    # CHẾ ĐỘ BINARY: Đọc thô tự nhiên
                     chunk = f.read(CHUNK_SIZE)
                     if not chunk:
                         eof_reached = True
@@ -79,8 +81,6 @@ def rdt_send(filename, target_addr, data_type='I', speed_cb=None, udp_sock=None)
                 if base == next_seq_num: start_time = time.time()
                 next_seq_num += 1
 
-            # SỬA LỖI 2: Dùng select để socket chờ gói tin tới tối đa 0.01 giây
-            # Thao tác này nhường nhịp CPU cho OS, đưa mức ngốn CPU từ 100% xuống ~0%
             ready_to_read, _, _ = select.select([udp_sock], [], [], 0.01)
 
             if ready_to_read:
@@ -109,7 +109,6 @@ def rdt_send(filename, target_addr, data_type='I', speed_cb=None, udp_sock=None)
                 except BlockingIOError: 
                     pass 
 
-            # Xử lý Timeout Re-transmission (truyền lại)
             if base < next_seq_num and time.time() - start_time > TIMEOUT:
                 ssthresh = max(2.0, cwnd / 2.0)
                 cwnd = 1.0                      
@@ -117,7 +116,6 @@ def rdt_send(filename, target_addr, data_type='I', speed_cb=None, udp_sock=None)
                     if i in window_buffer: udp_sock.sendto(window_buffer[i], target_addr)
                 start_time = time.time()
 
-    # Đoạn dọn dẹp kết nối EOF ở lại bên ngoài khối 'with'
     udp_sock.setblocking(True) 
     udp_sock.settimeout(2.0)
     eof_packet = make_packet(next_seq_num, 0, FLAG_EOF, b'EOF')
@@ -131,29 +129,21 @@ def rdt_send(filename, target_addr, data_type='I', speed_cb=None, udp_sock=None)
         except (socket.timeout, ConnectionResetError): pass
     
     if speed_cb: speed_cb("0.0 KB/s")
-    # SỬA LẠI LOGIC ĐÓNG SOCKET Ở CUỐI CÙNG
+    
     if close_sock_when_done:
-        udp_sock.close() # Chỉ đóng nếu rdt_send tự tạo ra nó
+        udp_sock.close() 
     else:
-        udp_sock.setblocking(True) # Trả lại trạng thái blocking ban đầu cho socket dùng chung
+        udp_sock.setblocking(True) 
         
     return True
 
 def rdt_receive(udp_sock, save_filename, data_type='I', speed_cb=None):
     expected_seq = 0
-    
-    open_kwargs = {}
-    if data_type == 'A':
-        mode = "w"
-        open_kwargs['encoding'] = "utf-8"
-        open_kwargs['newline'] = None # Fix lỗi xuống dòng hỗn loạn trên Windows
-    else:
-        mode = "wb"
-
     measure_start = time.time()
     bytes_recv_interval = 0
 
-    with open(save_filename, mode, **open_kwargs) as f:
+    # LUÔN GHI Ở CHẾ ĐỘ NHỊ PHÂN
+    with open(save_filename, "wb") as f:
         while True:
             try:
                 data, addr = udp_sock.recvfrom(2048) 
@@ -169,8 +159,8 @@ def rdt_receive(udp_sock, save_filename, data_type='I', speed_cb=None):
                     
                 if seq_num == expected_seq:
                     if data_type == 'A':
-                        text_chunk = payload.decode('utf-8', errors='ignore')
-                        f.write(text_chunk.replace('\r\n', '\n'))
+                        # Lọc bỏ byte \r\n thành \n khi nhận được để chuẩn hóa file Text trên mọi hệ điều hành
+                        f.write(payload.replace(b'\r\n', b'\n'))
                     else:
                         f.write(payload)
                     
@@ -188,19 +178,15 @@ def rdt_receive(udp_sock, save_filename, data_type='I', speed_cb=None):
                     if expected_seq > 0:
                         ack_packet = make_packet(expected_seq - 1, expected_seq - 1, FLAG_ACK, b'')
                         udp_sock.sendto(ack_packet, addr)
-            # Thay thế except Exception: pass bằng đoạn sau:
             except (BlockingIOError, socket.timeout):
-                # Bỏ qua an toàn: Gói tin đơn giản là chưa tới
                 pass 
             except (struct.error, zlib.error):
-                # Bỏ qua an toàn: Gói tin bị hỏng form hoặc sai checksum trong quá trình truyền
                 pass
             except ConnectionResetError:
-                # NGHIÊM TRỌNG: Đầu kia đã sập hoặc ngắt kết nối đột ngột
                 print("[!] Lỗi mạng: Client đã ngắt kết nối đột ngột.")
                 break 
             except Exception as e:
-                # NHỮNG LỖI LẠ (Lỗi code, v.v.) BẮT BUỘC PHẢI IN RA ĐỂ CÒN SỬA
                 print(f"[!] LỖI NGHIÊM TRỌNG TRONG QUÁ TRÌNH NHẬN RDT: {e}")
                 break
+                
     if speed_cb: speed_cb("0.0 KB/s")
