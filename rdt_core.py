@@ -4,6 +4,7 @@ import struct
 import zlib
 import time
 import select
+import random
 
 HEADER_FORMAT = '!IIHHI'
 HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
@@ -76,8 +77,11 @@ def rdt_send(filename, target_addr, data_type='I', speed_cb=None, udp_sock=None)
                 
                 packet = make_packet(next_seq_num, 0, FLAG_DATA, chunk)
                 window_buffer[next_seq_num] = packet 
-                udp_sock.sendto(packet, target_addr)
-                
+                try:
+                    udp_sock.sendto(packet, target_addr)
+                except (BlockingIOError, OSError):
+                    pass  # Nếu buffer bị nghẽn tạm thời, cơ chế timeout/retransmit sẽ tự gửi lại
+
                 if base == next_seq_num: start_time = time.time()
                 next_seq_num += 1
 
@@ -110,10 +114,15 @@ def rdt_send(filename, target_addr, data_type='I', speed_cb=None, udp_sock=None)
                     pass 
 
             if base < next_seq_num and time.time() - start_time > TIMEOUT:
+                print(f"[*] TIMEOUT: Nghi ngờ mất gói tin! Đang truyền lại từ Sequence {base}")
                 ssthresh = max(2.0, cwnd / 2.0)
                 cwnd = 1.0                      
                 for i in range(base, next_seq_num):
-                    if i in window_buffer: udp_sock.sendto(window_buffer[i], target_addr)
+                    if i in window_buffer:
+                        try:
+                            udp_sock.sendto(window_buffer[i], target_addr)
+                        except (BlockingIOError, OSError):
+                            pass
                 start_time = time.time()
 
     udp_sock.setblocking(True) 
@@ -150,7 +159,9 @@ def rdt_receive(udp_sock, save_filename, data_type='I', speed_cb=None):
                 seq_num, ack_num, flags, payload_len, checksum, payload = parse_packet(data)
                 
                 computed_checksum = zlib.crc32(payload) & 0xffffffff
-                if computed_checksum != checksum: continue 
+                if computed_checksum != checksum: 
+                    print(f"[!] PHÁT HIỆN LỖI CRC32: Gói tin Sequence {seq_num} bị hỏng bit. Đang loại bỏ!")
+                    continue 
                 
                 if flags == FLAG_EOF:
                     ack_packet = make_packet(seq_num, seq_num, FLAG_ACK, b'')
